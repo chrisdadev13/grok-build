@@ -1,0 +1,25 @@
+crates/codegen/xai-grok-pager/src/acp/codex.rs
+  s_b7b6bef01bca9c::t_c381c76bb598d0 369,862-867
+  s_b7b6bef01bca9c::t_5d1618719b6d86 343,371,861,883
+  s_b7b6bef01bca9c::t_20eb067f70b491 878-882,884-893
+  s_b7b6bef01bca9c::t_fb66f3f3571b26 868-869
+crates/codegen/xai-grok-pager/src/app/acp_handler/tests/mcp.rs
+  s_b7b6bef01bca9c::t_7370de90830660 32-53
+  s_b7b6bef01bca9c::t_9aacef7bb05079 31
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "6711c5322d2ce263391f5ba5bd228f3bd43d86c4",
+  "prompts": {},
+  "sessions": {
+    "s_b7b6bef01bca9c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f68c1-bd88-7e23-83aa-e39ade8cc762",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "chrisdadev13 <chrisdadev13@gmail.com>"
+    }
+  }
+}
