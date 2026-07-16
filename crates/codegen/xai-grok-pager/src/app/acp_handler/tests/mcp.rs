@@ -29,6 +29,29 @@
     }
 
     #[test]
+    fn mcp_initialized_before_session_created_clears_startup_seed() {
+        let mut app = make_app_with_agent("placeholder");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.session_id = None;
+        agent.mcp_init_progress = Some(crate::app::agent_view::McpInitProgress {
+            total: 0,
+            connected: 0,
+            started_at: Instant::now(),
+        });
+
+        let changed = handle_ext_notification(
+            &make_mcp_initialized_notif("codex-thread-before-bind"),
+            &mut app,
+        );
+
+        assert!(changed);
+        assert!(
+            app.agents[&AgentId(0)].mcp_init_progress.is_none(),
+            "Codex completion racing ahead of SessionCreated must clear the startup seed",
+        );
+    }
+
+    #[test]
     fn server_status_routes_to_owning_agent() {
         use crate::views::extensions_modal::TabDataState;
         use crate::views::mcps_modal::McpServerDisplayStatus;
@@ -724,4 +747,3 @@
             "legacy fallback targets the foregrounded agent"
         );
     }
-

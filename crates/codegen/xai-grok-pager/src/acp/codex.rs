@@ -340,6 +340,7 @@ impl acp::Agent for CodexAgent {
         self.selected_models
             .borrow_mut()
             .insert(thread_id.clone(), model.clone());
+        notify_session_startup_complete(&self.client, &thread_id);
         Ok(acp::NewSessionResponse::new(thread_id).models(self.model_state(model)))
     }
 
@@ -365,8 +366,9 @@ impl acp::Agent for CodexAgent {
             .to_owned();
         self.selected_models
             .borrow_mut()
-            .insert(session_id, model.clone());
+            .insert(session_id.clone(), model.clone());
         replay_thread(&self.client, &response).await;
+        notify_session_startup_complete(&self.client, &session_id);
         Ok(acp::LoadSessionResponse::new().models(self.model_state(model)))
     }
 
@@ -856,6 +858,15 @@ fn new_thread_params(cwd: PathBuf, openai_docs_mcp: bool) -> Value {
     params
 }
 
+fn notify_session_startup_complete(client: &AcpGatewaySender<acp::AgentSide>, session_id: &str) {
+    let params = serde_json::value::to_raw_value(&json!({"sessionId": session_id}))
+        .expect("static MCP initialization payload must serialize");
+    client.forward_fire_and_forget(acp::ExtNotification::new(
+        "x.ai/mcp_initialized",
+        params.into(),
+    ));
+}
+
 fn acp_error(error: anyhow::Error) -> acp::Error {
     acp::Error::new(acp::ErrorCode::InternalError.into(), error.to_string())
 }
@@ -863,6 +874,22 @@ fn acp_error(error: anyhow::Error) -> acp::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn codex_session_success_notifies_pager_that_startup_is_complete() {
+        let (mut client_channel, agent_channel) = xai_acp_lib::acp_channels();
+        let client = AcpGatewaySender::new(agent_channel.tx);
+
+        notify_session_startup_complete(&client, "thread-1");
+
+        let message = client_channel.rx.recv().await.unwrap();
+        let xai_acp_lib::AcpClientMessage::ExtNotification(args) = message else {
+            panic!("expected MCP initialization notification");
+        };
+        assert_eq!(args.request.method.as_ref(), "x.ai/mcp_initialized");
+        let params: Value = serde_json::from_str(args.request.params.get()).unwrap();
+        assert_eq!(params, json!({"sessionId": "thread-1"}));
+    }
 
     #[test]
     fn maps_codex_default_model_catalog_to_initial_acp_state() {
