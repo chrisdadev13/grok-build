@@ -19,6 +19,65 @@ use crate::theme::Theme;
 use crate::views::modal::{self, ActiveModal};
 
 impl AgentView {
+    fn step_model_picker_effort(&mut self, ev: &crossterm::event::Event) -> bool {
+        let Event::Key(key) = ev else { return false };
+        if key.kind == KeyEventKind::Release || !key.modifiers.is_empty() {
+            return false;
+        }
+        let delta = match key.code {
+            KeyCode::Left => -1isize,
+            KeyCode::Right => 1,
+            _ => return false,
+        };
+        let Some(ActiveModal::ArgPicker {
+            command,
+            args_query,
+            items,
+            state,
+            model_efforts,
+            ..
+        }) = self.active_modal.as_mut()
+        else {
+            return false;
+        };
+        if !matches!(command.as_str(), "model" | "m") || !args_query.is_empty() {
+            return false;
+        }
+        let Some(item) = items.get(state.selected) else {
+            return false;
+        };
+        let Some(model_id) = self
+            .session
+            .models
+            .resolve_by_name_or_id(item.insert_text.trim())
+        else {
+            return false;
+        };
+        let options = self.session.models.reasoning_effort_options_for(&model_id);
+        if options.is_empty() {
+            return true;
+        }
+        let current = model_efforts
+            .get(&model_id)
+            .copied()
+            .or_else(|| {
+                options
+                    .iter()
+                    .find(|option| option.default)
+                    .map(|option| option.value)
+            })
+            .unwrap_or(options[0].value);
+        let current_idx = options
+            .iter()
+            .position(|option| option.value == current)
+            .unwrap_or(0);
+        let next_idx = current_idx
+            .saturating_add_signed(delta)
+            .min(options.len().saturating_sub(1));
+        model_efforts.insert(model_id, options[next_idx].value);
+        true
+    }
+
     /// `suggest_args` falls back to model rows when the query is not in effort
     /// phase. Model-phase reasoning rows use a trailing space in `insert_text`;
     /// effort rows do not. Require a non-empty list with no trailing-space
@@ -489,6 +548,10 @@ impl AgentView {
             FilterChanged,
         }
 
+        if self.step_model_picker_effort(ev) {
+            return InputOutcome::Changed;
+        }
+
         let (command_clone, in_effort_phase, entry_count) = match self.active_modal.as_ref() {
             Some(ActiveModal::ArgPicker {
                 command,
@@ -584,6 +647,26 @@ impl AgentView {
                 InputOutcome::Changed
             }
             ArgPickerStep::Selected(item) => {
+                if matches!(command_clone.as_str(), "model" | "m") && !in_effort_phase {
+                    let effort = self
+                        .session
+                        .models
+                        .resolve_by_name_or_id(item.insert_text.trim())
+                        .and_then(|model_id| match self.active_modal.as_ref() {
+                            Some(ActiveModal::ArgPicker { model_efforts, .. }) => {
+                                model_efforts.get(&model_id).copied()
+                            }
+                            _ => None,
+                        });
+                    let full = match effort {
+                        Some(effort) => {
+                            format!("/{} {} {}", command_clone, item.insert_text.trim(), effort)
+                        }
+                        None => format!("/{} {}", command_clone, item.insert_text.trim()),
+                    };
+                    self.active_modal = None;
+                    return InputOutcome::Action(Action::SendSlashCommandPreservingDraft(full));
+                }
                 let chains_to_effort = matches!(command_clone.as_str(), "model" | "m")
                     && item.insert_text.ends_with(char::is_whitespace);
                 if chains_to_effort {
@@ -822,6 +905,10 @@ impl AgentView {
                                             args_query: String::new(),
                                             items: items.clone(),
                                             original_items: items,
+                                            model_efforts: self
+                                                .session
+                                                .models
+                                                .initial_reasoning_efforts(),
                                             // Type-to-find: open in input mode (vim: Esc→nav, i→input).
                                             state: crate::views::picker::PickerState::input_active(
                                             ),
@@ -1697,6 +1784,7 @@ impl AgentView {
                 items,
                 state,
                 window,
+                model_efforts,
                 ..
             } = active_modal
             {
@@ -1707,12 +1795,32 @@ impl AgentView {
                     "theme" | "t" => "Pick theme",
                     _ => "Pick option",
                 };
+                let is_model_phase =
+                    matches!(command.as_str(), "model" | "m") && args_query.is_empty();
+                let display_labels: Vec<String> = items
+                    .iter()
+                    .map(|item| {
+                        let effort = is_model_phase
+                            .then(|| {
+                                self.session
+                                    .models
+                                    .resolve_by_name_or_id(item.insert_text.trim())
+                            })
+                            .flatten()
+                            .and_then(|model_id| model_efforts.get(&model_id));
+                        match effort {
+                            Some(effort) => format!("{}  ‹ {effort} ›", item.display),
+                            None => item.display.clone(),
+                        }
+                    })
+                    .collect();
                 let picker_entries: Vec<PickerEntry> = items
                     .iter()
+                    .zip(&display_labels)
                     .enumerate()
-                    .map(|(i, item)| {
+                    .map(|(i, (item, display_label))| {
                         PickerEntry::Row(PickerRow {
-                            label: &item.display,
+                            label: display_label,
                             right_label: &item.description,
                             selected: state.hovered == Some(i)
                                 || (state.hovered.is_none() && i == state.selected),
@@ -1730,6 +1838,16 @@ impl AgentView {
                     })
                     .collect();
                 let compact = self.scrollback.appearance().prompt.compact;
+                if is_model_phase {
+                    picker_shortcuts.insert(
+                        1,
+                        Shortcut {
+                            label: "←/→ effort",
+                            clickable: false,
+                            id: 0,
+                        },
+                    );
+                }
                 // Surface `i search` in the footer when vim nav mode is active.
                 mw::push_vim_nav_search_hint(&mut picker_shortcuts, state.search_active);
                 let modal_config = ModalWindowConfig {
@@ -2272,6 +2390,123 @@ impl AgentView {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod model_picker_effort_tests {
+    use std::sync::Arc;
+
+    use agent_client_protocol as acp;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use xai_grok_shell::sampling::types::ReasoningEffort;
+
+    use crate::app::actions::Action;
+    use crate::app::agent_view::AgentView;
+    use crate::app::agent_view::test_fixtures::make_agent;
+    use crate::app::app_view::InputOutcome;
+    use crate::slash::command::ArgItem;
+    use crate::views::modal::ActiveModal;
+
+    fn open_model_picker(agent: &mut AgentView) -> acp::ModelId {
+        let id = acp::ModelId::new(Arc::from("gpt-5.6-sol"));
+        let info = acp::ModelInfo::new(id.clone(), "GPT-5.6 Sol".to_string()).meta(
+            serde_json::json!({
+                "supportsReasoningEffort": true,
+                "reasoningEffort": "low",
+                "reasoningEfforts": [
+                    {"id": "low", "value": "low", "label": "Low", "default": true},
+                    {"id": "xhigh", "value": "xhigh", "label": "Extra High"},
+                    {"id": "max", "value": "max", "label": "Max"},
+                    {"id": "ultra", "value": "ultra", "label": "Ultra"}
+                ]
+            })
+            .as_object()
+            .cloned(),
+        );
+        agent.session.models.available.clear();
+        agent.session.models.available.insert(id.clone(), info);
+        agent.session.models.current = Some(id.clone());
+        agent.session.models.reasoning_effort = Some(ReasoningEffort::Low);
+        agent.active_modal = Some(ActiveModal::ArgPicker {
+            command: "model".into(),
+            args_query: String::new(),
+            items: vec![ArgItem {
+                display: "GPT-5.6 Sol (current)".into(),
+                match_text: "GPT-5.6 Sol".into(),
+                insert_text: "GPT-5.6 Sol ".into(),
+                description: "Latest frontier model".into(),
+            }],
+            original_items: vec![],
+            model_efforts: agent.session.models.initial_reasoning_efforts(),
+            state: crate::views::picker::PickerState::input_active(),
+            previous_palette: None,
+            window: Default::default(),
+        });
+        id
+    }
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn right_arrow_steps_effort_in_catalog_order_and_clamps() {
+        let mut agent = make_agent();
+        let id = open_model_picker(&mut agent);
+
+        for expected in [
+            ReasoningEffort::Xhigh,
+            ReasoningEffort::Max,
+            ReasoningEffort::Ultra,
+            ReasoningEffort::Ultra,
+        ] {
+            assert!(matches!(
+                agent.handle_palette_or_arg_input(&key(KeyCode::Right)),
+                InputOutcome::Changed
+            ));
+            let Some(ActiveModal::ArgPicker { model_efforts, .. }) = &agent.active_modal else {
+                panic!("model picker closed unexpectedly");
+            };
+            assert_eq!(model_efforts.get(&id), Some(&expected));
+        }
+
+        agent.handle_palette_or_arg_input(&key(KeyCode::Left));
+        let Some(ActiveModal::ArgPicker { model_efforts, .. }) = &agent.active_modal else {
+            panic!("model picker closed unexpectedly");
+        };
+        assert_eq!(model_efforts.get(&id), Some(&ReasoningEffort::Max));
+    }
+
+    #[test]
+    fn enter_confirms_model_and_pending_effort_together() {
+        let mut agent = make_agent();
+        open_model_picker(&mut agent);
+        agent.handle_palette_or_arg_input(&key(KeyCode::Right));
+        agent.handle_palette_or_arg_input(&key(KeyCode::Right));
+
+        let outcome = agent.handle_palette_or_arg_input(&key(KeyCode::Enter));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::SendSlashCommandPreservingDraft(ref command))
+                if command == "/model GPT-5.6 Sol max"
+        ));
+    }
+
+    #[test]
+    fn arrows_keep_stepping_after_model_list_is_filtered() {
+        let mut agent = make_agent();
+        let id = open_model_picker(&mut agent);
+        let Some(ActiveModal::ArgPicker { state, .. }) = agent.active_modal.as_mut() else {
+            panic!("model picker did not open");
+        };
+        state.query = "sol".into();
+
+        agent.handle_palette_or_arg_input(&key(KeyCode::Right));
+        let Some(ActiveModal::ArgPicker { model_efforts, .. }) = &agent.active_modal else {
+            panic!("model picker closed unexpectedly");
+        };
+        assert_eq!(model_efforts.get(&id), Some(&ReasoningEffort::Xhigh));
     }
 }
 

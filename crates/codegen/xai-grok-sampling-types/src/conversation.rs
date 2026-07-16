@@ -2148,7 +2148,7 @@ impl From<&ConversationRequest> for rs::CreateResponse {
             prompt_cache_key: None,
             prompt_cache_retention: None,
             reasoning: Some(rs::Reasoning {
-                effort: req.reasoning_effort.map(|e| e.to_responses_api()),
+                effort: req.reasoning_effort.and_then(|e| e.to_responses_api()),
                 summary: Some(rs::ReasoningSummary::Concise),
             }),
             safety_identifier: None,

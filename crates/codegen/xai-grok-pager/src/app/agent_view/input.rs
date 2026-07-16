@@ -1030,6 +1030,7 @@ impl AgentView {
                             args_query: String::new(),
                             items: items.clone(),
                             original_items: items,
+                            model_efforts: self.session.models.initial_reasoning_efforts(),
                             state: crate::views::picker::PickerState::input_active(),
                             previous_palette: None,
                             window: crate::views::modal_window::ModalWindowState::new(),

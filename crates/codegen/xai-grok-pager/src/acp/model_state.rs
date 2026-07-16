@@ -204,6 +204,30 @@ impl ModelState {
         parse_reasoning_efforts_meta(info.meta.as_ref()).unwrap_or_else(legacy_effort_options)
     }
 
+    /// Initial pending effort for every model in the picker. The active model
+    /// keeps its session value; other models start from their advertised
+    /// default (or the first advertised option when no default is marked).
+    pub(crate) fn initial_reasoning_efforts(
+        &self,
+    ) -> std::collections::HashMap<acp::ModelId, ReasoningEffort> {
+        self.available
+            .keys()
+            .filter_map(|id| {
+                let options = self.reasoning_effort_options_for(id);
+                let effort = if self.current.as_ref() == Some(id) {
+                    self.reasoning_effort
+                } else {
+                    options
+                        .iter()
+                        .find(|option| option.default)
+                        .or_else(|| options.first())
+                        .map(|option| option.value)
+                }?;
+                Some((id.clone(), effort))
+            })
+            .collect()
+    }
+
     /// Map a typed/selected effort token to its canonical value for the current
     /// model. Accepts a menu option id (case-insensitive) or a canonical level
     /// that appears as a **value** in that model's menu. Levels the model does
@@ -231,7 +255,7 @@ impl ModelState {
         {
             return Some(option.value);
         }
-        // Canonical level (e.g. "high", "max"→xhigh) only if the model menu
+        // Canonical level (e.g. "high" or "max") only if the model menu
         // actually offers that value — not free-form power-user aliases that
         // would 400 on the server (e.g. `none` on grok-4.5).
         let parsed = token.parse::<ReasoningEffort>().ok()?;

@@ -196,6 +196,12 @@ pub enum ActiveModal {
         items: Vec<crate::slash::command::ArgItem>,
         /// Original items from suggest_args() (source for filtering).
         original_items: Vec<crate::slash::command::ArgItem>,
+        /// Pending per-model effort choices. Arrow keys update this map; the
+        /// selected pair is sent only when the user confirms with Enter.
+        model_efforts: std::collections::HashMap<
+            agent_client_protocol::ModelId,
+            xai_grok_shell::sampling::types::ReasoningEffort,
+        >,
         /// Unified picker state.
         state: crate::views::picker::PickerState,
         /// Previous command palette state (if opened from palette). Restored on Esc.

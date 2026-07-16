@@ -16,6 +16,9 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 use xai_acp_lib::AcpGatewaySender;
+use xai_grok_shell::sampling::types::{
+    REASONING_EFFORT_META_KEY, ReasoningEffort, parse_reasoning_effort_meta,
+};
 
 struct CodexRpc {
     outbound: mpsc::UnboundedSender<Value>,
@@ -158,12 +161,18 @@ pub struct CodexAgent {
     rpc: Rc<CodexRpc>,
     client: AcpGatewaySender<acp::AgentSide>,
     models: Rc<RefCell<Vec<acp::ModelInfo>>>,
-    selected_models: Rc<RefCell<HashMap<String, String>>>,
+    selected_models: Rc<RefCell<HashMap<String, CodexModelSelection>>>,
     active_turns: Rc<RefCell<HashMap<String, String>>>,
     completions: Rc<RefCell<HashMap<String, oneshot::Sender<acp::StopReason>>>>,
     login_completions: Rc<RefCell<HashMap<String, oneshot::Sender<Result<()>>>>>,
     authenticated: Cell<bool>,
     openai_docs_mcp: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CodexModelSelection {
+    model: String,
+    effort: Option<ReasoningEffort>,
 }
 
 impl CodexAgent {
@@ -208,8 +217,39 @@ impl CodexAgent {
         Ok(map_model_state(&response, models))
     }
 
-    fn model_state(&self, current: String) -> acp::SessionModelState {
-        acp::SessionModelState::new(current, self.models.borrow().clone())
+    fn model_state(
+        &self,
+        current: String,
+        effort: Option<ReasoningEffort>,
+    ) -> acp::SessionModelState {
+        let mut models = self.models.borrow().clone();
+        if let Some(effort) = effort
+            && let Some(info) = models
+                .iter_mut()
+                .find(|info| info.model_id.0.as_ref() == current)
+        {
+            info.meta
+                .get_or_insert_with(serde_json::Map::new)
+                .insert(REASONING_EFFORT_META_KEY.into(), json!(effort.as_str()));
+        }
+        acp::SessionModelState::new(current, models)
+    }
+
+    fn record_session_selection(
+        &self,
+        session_id: String,
+        model: String,
+        response: &Value,
+    ) -> Option<ReasoningEffort> {
+        let effort = response
+            .get("reasoningEffort")
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse().ok())
+            .or_else(|| default_effort_for_model(&self.models.borrow(), &model));
+        self.selected_models
+            .borrow_mut()
+            .insert(session_id, CodexModelSelection { model, effort });
+        effort
     }
 }
 
@@ -313,11 +353,16 @@ impl acp::Agent for CodexAgent {
         &self,
         args: acp::NewSessionRequest,
     ) -> acp::Result<acp::NewSessionResponse> {
+        let requested_model = args
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("modelId"))
+            .and_then(Value::as_str);
         let response = self
             .rpc
             .request(
                 "thread/start",
-                new_thread_params(args.cwd, self.openai_docs_mcp),
+                new_thread_params(args.cwd, self.openai_docs_mcp, requested_model),
             )
             .await
             .map_err(acp_error)?;
@@ -337,11 +382,9 @@ impl acp::Agent for CodexAgent {
                     .map(|model| model.model_id.0.to_string())
             })
             .unwrap_or_else(|| "default".to_owned());
-        self.selected_models
-            .borrow_mut()
-            .insert(thread_id.clone(), model.clone());
+        let effort = self.record_session_selection(thread_id.clone(), model.clone(), &response);
         notify_session_startup_complete(&self.client, &thread_id);
-        Ok(acp::NewSessionResponse::new(thread_id).models(self.model_state(model)))
+        Ok(acp::NewSessionResponse::new(thread_id).models(self.model_state(model, effort)))
     }
 
     async fn load_session(
@@ -364,27 +407,26 @@ impl acp::Agent for CodexAgent {
             .and_then(Value::as_str)
             .unwrap_or("default")
             .to_owned();
-        self.selected_models
-            .borrow_mut()
-            .insert(session_id.clone(), model.clone());
+        let effort = self.record_session_selection(session_id.clone(), model.clone(), &response);
         replay_thread(&self.client, &response).await;
         notify_session_startup_complete(&self.client, &session_id);
-        Ok(acp::LoadSessionResponse::new().models(self.model_state(model)))
+        Ok(acp::LoadSessionResponse::new().models(self.model_state(model, effort)))
     }
 
     async fn prompt(&self, args: acp::PromptRequest) -> acp::Result<acp::PromptResponse> {
         let thread_id = args.session_id.0.to_string();
         let input = prompt_to_codex_input(&args.prompt);
-        let model = self.selected_models.borrow().get(&thread_id).cloned();
+        let selection = self.selected_models.borrow().get(&thread_id).cloned();
+        let model = selection.as_ref().map(|selection| selection.model.clone());
+        let effort = selection
+            .as_ref()
+            .and_then(|selection| selection.effort)
+            .map(ReasoningEffort::as_str);
         let response = self
             .rpc
             .request(
                 "turn/start",
-                json!({
-                    "threadId": thread_id,
-                    "input": input,
-                    "model": model
-                }),
+                turn_start_params(&thread_id, input, model, effort),
             )
             .await
             .map_err(acp_error)?;
@@ -424,9 +466,13 @@ impl acp::Agent for CodexAgent {
         &self,
         args: acp::SetSessionModelRequest,
     ) -> acp::Result<acp::SetSessionModelResponse> {
-        self.selected_models
-            .borrow_mut()
-            .insert(args.session_id.0.to_string(), args.model_id.0.to_string());
+        let model = args.model_id.0.to_string();
+        let effort = parse_reasoning_effort_meta(args.meta.as_ref())
+            .or_else(|| default_effort_for_model(&self.models.borrow(), &model));
+        self.selected_models.borrow_mut().insert(
+            args.session_id.0.to_string(),
+            CodexModelSelection { model, effort },
+        );
         Ok(acp::SetSessionModelResponse::new())
     }
 
@@ -811,7 +857,40 @@ fn map_models(response: &Value) -> Vec<acp::ModelInfo> {
                 .or_else(|| model.get("name"))
                 .and_then(Value::as_str)
                 .unwrap_or(id);
-            Some(acp::ModelInfo::new(id.to_owned(), name.to_owned()))
+            let default_effort = model.get("defaultReasoningEffort").and_then(Value::as_str);
+            let effort_options: Vec<Value> = model
+                .get("supportedReasoningEfforts")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|option| {
+                    let effort = option.get("reasoningEffort")?.as_str()?;
+                    Some(json!({
+                        "id": effort,
+                        "value": effort,
+                        "label": humanize_effort(effort),
+                        "description": option.get("description").and_then(Value::as_str),
+                        "default": default_effort == Some(effort),
+                    }))
+                })
+                .collect();
+            let mut meta = serde_json::Map::new();
+            if !effort_options.is_empty() {
+                meta.insert("supportsReasoningEffort".into(), Value::Bool(true));
+                meta.insert("reasoningEfforts".into(), Value::Array(effort_options));
+            }
+            if let Some(default_effort) = default_effort {
+                meta.insert(REASONING_EFFORT_META_KEY.into(), json!(default_effort));
+            }
+            if let Some(modalities) = model.get("inputModalities") {
+                meta.insert("inputModalities".into(), modalities.clone());
+            }
+            let mut info = acp::ModelInfo::new(id.to_owned(), name.to_owned())
+                .meta((!meta.is_empty()).then_some(meta));
+            if let Some(description) = model.get("description").and_then(Value::as_str) {
+                info = info.description(description.to_owned());
+            }
+            Some(info)
         })
         .collect()
 }
@@ -839,6 +918,21 @@ fn model_id(model: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
+fn humanize_effort(effort: &str) -> String {
+    let mut chars = effort.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+fn default_effort_for_model(models: &[acp::ModelInfo], model: &str) -> Option<ReasoningEffort> {
+    models
+        .iter()
+        .find(|info| info.model_id.0.as_ref() == model)
+        .and_then(|info| parse_reasoning_effort_meta(info.meta.as_ref()))
+}
+
 /// This optional global MCP can spend several seconds repeating OAuth metadata
 /// discovery during every embedded thread start. Keep it out by default while
 /// allowing users who need its tools to preserve it explicitly.
@@ -848,14 +942,31 @@ fn apply_thread_config(params: &mut Value, openai_docs_mcp: bool) {
     }
 }
 
-fn new_thread_params(cwd: PathBuf, openai_docs_mcp: bool) -> Value {
+fn new_thread_params(cwd: PathBuf, openai_docs_mcp: bool, model: Option<&str>) -> Value {
     let mut params = json!({
         "cwd": cwd,
         "approvalPolicy": "on-request",
         "sandbox": "workspace-write"
     });
     apply_thread_config(&mut params, openai_docs_mcp);
+    if let Some(model) = model {
+        params["model"] = json!(model);
+    }
     params
+}
+
+fn turn_start_params(
+    thread_id: &str,
+    input: Vec<Value>,
+    model: Option<String>,
+    effort: Option<&str>,
+) -> Value {
+    json!({
+        "threadId": thread_id,
+        "input": input,
+        "model": model,
+        "effort": effort,
+    })
 }
 
 fn notify_session_startup_complete(client: &AcpGatewaySender<acp::AgentSide>, session_id: &str) {
@@ -895,21 +1006,49 @@ mod tests {
     fn maps_codex_default_model_catalog_to_initial_acp_state() {
         let response = json!({"data": [
             {"id": "gpt-5.4", "displayName": "GPT-5.4", "isDefault": false},
-            {"model": "gpt-5.3-codex", "name": "GPT-5.3 Codex", "isDefault": true}
+            {
+                "model": "gpt-5.6-sol",
+                "name": "GPT-5.6 Sol",
+                "description": "Latest frontier agentic coding model.",
+                "isDefault": true,
+                "defaultReasoningEffort": "low",
+                "supportedReasoningEfforts": [
+                    {"reasoningEffort": "low", "description": "Fast"},
+                    {"reasoningEffort": "xhigh", "description": "Extra high"},
+                    {"reasoningEffort": "max", "description": "Maximum"},
+                    {"reasoningEffort": "ultra", "description": "Automatic delegation"}
+                ]
+            }
         ]});
         let model_state = map_model_state(&response, map_models(&response)).unwrap();
-        assert_eq!(model_state.current_model_id.0.as_ref(), "gpt-5.3-codex");
+        assert_eq!(model_state.current_model_id.0.as_ref(), "gpt-5.6-sol");
         assert_eq!(model_state.available_models.len(), 2);
         assert_eq!(
             model_state.available_models[0].model_id.0.as_ref(),
             "gpt-5.4"
         );
-        assert_eq!(model_state.available_models[1].name, "GPT-5.3 Codex");
+        let sol = &model_state.available_models[1];
+        assert_eq!(sol.name, "GPT-5.6 Sol");
+        assert_eq!(
+            sol.description.as_deref(),
+            Some("Latest frontier agentic coding model.")
+        );
+        let meta = sol.meta.as_ref().unwrap();
+        assert_eq!(meta["reasoningEffort"], "low");
+        let efforts = meta["reasoningEfforts"].as_array().unwrap();
+        assert_eq!(
+            efforts
+                .iter()
+                .map(|entry| entry["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["low", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(efforts[0]["default"], true);
     }
 
     #[test]
     fn codex_thread_start_disables_redundant_docs_mcp_discovery() {
-        let params = new_thread_params(PathBuf::from("/workspace"), false);
+        let params = new_thread_params(PathBuf::from("/workspace"), false, None);
         assert_eq!(
             params.pointer("/config/mcp_servers.openaiDeveloperDocs.enabled"),
             Some(&Value::Bool(false))
@@ -918,8 +1057,39 @@ mod tests {
 
     #[test]
     fn codex_thread_start_can_preserve_docs_mcp() {
-        let params = new_thread_params(PathBuf::from("/workspace"), true);
+        let params = new_thread_params(PathBuf::from("/workspace"), true, None);
         assert!(params.get("config").is_none());
+    }
+
+    #[test]
+    fn codex_thread_start_uses_requested_model() {
+        let params = new_thread_params(PathBuf::from("/workspace"), true, Some("gpt-5.6-terra"));
+        assert_eq!(params["model"], "gpt-5.6-terra");
+    }
+
+    #[test]
+    fn codex_selection_preserves_max_and_ultra_as_distinct_efforts() {
+        assert_eq!(
+            "xhigh".parse::<ReasoningEffort>().unwrap().as_str(),
+            "xhigh"
+        );
+        assert_eq!("max".parse::<ReasoningEffort>().unwrap().as_str(), "max");
+        assert_eq!(
+            "ultra".parse::<ReasoningEffort>().unwrap().as_str(),
+            "ultra"
+        );
+    }
+
+    #[test]
+    fn codex_turn_start_forwards_selected_model_and_effort() {
+        let params = turn_start_params(
+            "thread-1",
+            vec![json!({"type": "text", "text": "hello"})],
+            Some("gpt-5.6-sol".into()),
+            Some("ultra"),
+        );
+        assert_eq!(params["model"], "gpt-5.6-sol");
+        assert_eq!(params["effort"], "ultra");
     }
 
     #[test]

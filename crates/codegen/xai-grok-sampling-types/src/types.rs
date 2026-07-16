@@ -770,17 +770,22 @@ pub enum ReasoningEffort {
     Medium,
     High,
     Xhigh,
+    Max,
+    Ultra,
 }
 
 impl ReasoningEffort {
-    pub fn to_responses_api(self) -> crate::rs::ReasoningEffort {
+    pub fn to_responses_api(self) -> Option<crate::rs::ReasoningEffort> {
         match self {
-            Self::None => crate::rs::ReasoningEffort::None,
-            Self::Minimal => crate::rs::ReasoningEffort::Minimal,
-            Self::Low => crate::rs::ReasoningEffort::Low,
-            Self::Medium => crate::rs::ReasoningEffort::Medium,
-            Self::High => crate::rs::ReasoningEffort::High,
-            Self::Xhigh => crate::rs::ReasoningEffort::Xhigh,
+            Self::None => Some(crate::rs::ReasoningEffort::None),
+            Self::Minimal => Some(crate::rs::ReasoningEffort::Minimal),
+            Self::Low => Some(crate::rs::ReasoningEffort::Low),
+            Self::Medium => Some(crate::rs::ReasoningEffort::Medium),
+            Self::High => Some(crate::rs::ReasoningEffort::High),
+            Self::Xhigh => Some(crate::rs::ReasoningEffort::Xhigh),
+            // Codex app-server levels are adapter-specific and must not be
+            // silently downgraded when constructing a Responses API request.
+            Self::Max | Self::Ultra => None,
         }
     }
 
@@ -805,6 +810,21 @@ impl ReasoningEffort {
             Self::Medium => "medium",
             Self::High => "high",
             Self::Xhigh => "xhigh",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
+        }
+    }
+
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Minimal => "Minimal",
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+            Self::Xhigh => "X-High",
+            Self::Max => "Max",
+            Self::Ultra => "Ultra",
         }
     }
 
@@ -816,6 +836,7 @@ impl ReasoningEffort {
             Self::Medium => Some("medium"),
             Self::High => Some("high"),
             Self::Xhigh => Some("max"),
+            Self::Max | Self::Ultra => None,
         }
     }
 }
@@ -836,15 +857,17 @@ impl std::str::FromStr for ReasoningEffort {
             "low" => Ok(Self::Low),
             "medium" => Ok(Self::Medium),
             "high" => Ok(Self::High),
-            "xhigh" | "max" => Ok(Self::Xhigh), // max is a CLI/UX alias of xhigh
+            "xhigh" => Ok(Self::Xhigh),
+            "max" => Ok(Self::Max),
+            "ultra" => Ok(Self::Ultra),
             _ => Err(format!(
-                "invalid reasoning effort: {s:?} (expected one of: none, minimal, low, medium, high, xhigh, max)"
+                "invalid reasoning effort: {s:?} (expected one of: none, minimal, low, medium, high, xhigh, max, ultra)"
             )),
         }
     }
 }
 
-/// Canonical wire parse only (`max` → `Xhigh`); remapped menu ids need a model catalog.
+/// Canonical wire parse only; remapped menu ids need a model catalog.
 pub fn parse_canonical_effort_token(token: &str) -> Option<ReasoningEffort> {
     token.parse().ok()
 }
@@ -1207,6 +1230,8 @@ mod tests {
             ReasoningEffort::Medium,
             ReasoningEffort::High,
             ReasoningEffort::Xhigh,
+            ReasoningEffort::Max,
+            ReasoningEffort::Ultra,
         ] {
             let json = serde_json::to_string(&v).unwrap();
             assert_eq!(json, format!("\"{}\"", v.as_str()), "serialize {v:?}");
@@ -1214,31 +1239,46 @@ mod tests {
             assert_eq!(back, v, "round-trip {v:?}");
         }
         assert!(serde_json::from_str::<ReasoningEffort>("\"BOGUS\"").is_err());
-        assert!(serde_json::from_str::<ReasoningEffort>("\"max\"").is_err());
     }
 
     #[test]
-    fn reasoning_effort_from_str_accepts_max_as_xhigh() {
+    fn reasoning_effort_from_str_preserves_codex_levels() {
         assert_eq!(
             "max".parse::<ReasoningEffort>().unwrap(),
-            ReasoningEffort::Xhigh
+            ReasoningEffort::Max
         );
         assert_eq!(
             "MAX".parse::<ReasoningEffort>().unwrap(),
-            ReasoningEffort::Xhigh
+            ReasoningEffort::Max
         );
         assert_eq!(
             "xhigh".parse::<ReasoningEffort>().unwrap(),
             ReasoningEffort::Xhigh
         );
+        assert_eq!(
+            "ultra".parse::<ReasoningEffort>().unwrap(),
+            ReasoningEffort::Ultra
+        );
         assert_eq!(ReasoningEffort::Xhigh.as_str(), "xhigh");
+    }
+
+    #[test]
+    fn codex_only_efforts_are_not_downgraded_for_other_apis() {
+        for effort in [ReasoningEffort::Max, ReasoningEffort::Ultra] {
+            assert_eq!(effort.to_responses_api(), None);
+            assert_eq!(effort.to_messages_api(), None);
+        }
     }
 
     #[test]
     fn parse_canonical_effort_token_helper() {
         assert_eq!(
             parse_canonical_effort_token("max"),
-            Some(ReasoningEffort::Xhigh)
+            Some(ReasoningEffort::Max)
+        );
+        assert_eq!(
+            parse_canonical_effort_token("ultra"),
+            Some(ReasoningEffort::Ultra)
         );
         assert_eq!(
             parse_canonical_effort_token("high"),
@@ -1398,7 +1438,12 @@ mod tests {
         );
         let bad_type = as_map(serde_json::json!({"reasoningEffort": 3}));
         assert_eq!(parse_reasoning_effort_meta(Some(&bad_type)), None);
-        let unknown = as_map(serde_json::json!({"reasoningEffort": "ULTRA"}));
+        let ultra = as_map(serde_json::json!({"reasoningEffort": "ULTRA"}));
+        assert_eq!(
+            parse_reasoning_effort_meta(Some(&ultra)),
+            Some(ReasoningEffort::Ultra)
+        );
+        let unknown = as_map(serde_json::json!({"reasoningEffort": "quantum"}));
         assert_eq!(parse_reasoning_effort_meta(Some(&unknown)), None);
     }
 

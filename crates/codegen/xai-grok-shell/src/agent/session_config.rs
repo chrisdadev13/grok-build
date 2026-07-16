@@ -52,15 +52,7 @@ impl GrokSessionDetail {
 }
 
 fn effort_label(effort: ReasoningEffort) -> String {
-    match effort {
-        ReasoningEffort::None => "None",
-        ReasoningEffort::Minimal => "Minimal",
-        ReasoningEffort::Low => "Low",
-        ReasoningEffort::Medium => "Medium",
-        ReasoningEffort::High => "High",
-        ReasoningEffort::Xhigh => "X-High",
-    }
-    .to_string()
+    effort.display_label().to_string()
 }
 
 /// The built-in session-picker modes used when the model has no server list.
