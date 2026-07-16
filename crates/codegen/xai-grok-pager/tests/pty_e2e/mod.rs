@@ -156,7 +156,7 @@ mod verify_bashq_claim2_force_interject;
 mod verify_bashq_claim3_edit_keeps_bash;
 mod waiting_for_model_label;
 mod welcome_screen;
-mod welcome_screen_braille_logo_renders_correctly;
+mod welcome_screen_has_no_grok_logo;
 mod wheel_burst_scrolls_viewport_without_frame_amplification;
 mod wheel_flood_paints_no_ghost_frames;
 mod wheel_overscroll_at_bottom_reengages_follow_mid_stream;

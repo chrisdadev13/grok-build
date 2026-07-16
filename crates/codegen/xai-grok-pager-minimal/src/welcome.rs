@@ -3,9 +3,9 @@
 //! Minimal skips the full-screen welcome view entirely, so the start of a
 //! session is otherwise invisible — you land straight at the prompt. To make a
 //! fresh session obvious (and on `/new` / `Ctrl+N`), this commits a compact,
-//! rounded card once into native scrollback: the braille logo, the version, the
-//! cwd, the model, and a one-line hint. It mirrors the full-TUI hero box's style
-//! (rounded dim border + logo) without its menu/onboarding.
+//! rounded card once into native scrollback: the version, cwd, model, and a
+//! one-line hint. It mirrors the full-TUI hero box's rounded, dim border without
+//! its menu/onboarding.
 //!
 //! It is printed via [`xai_ratatui_inline::Terminal::insert_before`] — the same
 //! one-shot mechanism the commit pipeline uses — gated on an `AppView` flag set
@@ -68,7 +68,7 @@ pub fn maybe_commit_welcome(app: &mut AppView, terminal: &mut PagerTerminal) {
         _ => (app.cwd.display().to_string(), None),
     };
 
-    // Info lines below the logo: title + version, cwd, optional model, hint.
+    // Startup card content: title + version, cwd, optional model, hint.
     let mut info: Vec<Line<'static>> = Vec::new();
     info.push(Line::from(vec![
         Span::styled(

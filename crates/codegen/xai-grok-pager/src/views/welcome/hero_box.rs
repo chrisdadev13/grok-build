@@ -1,4 +1,4 @@
-//! Hero box component — side-by-side logo + menu inside a bordered box.
+//! Hero box component — welcome content inside a bordered box.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Flex, Layout, Position, Rect};
@@ -16,11 +16,10 @@ pub(super) const HERO_BOX_MIN_WIDTH: u16 = 90;
 /// Vertical padding (rows) between the box border and its inner content.
 const V_PAD: u16 = 1;
 
-/// Horizontal inset (cols) between the right column's content and the box
-/// border; also the collapsed left-column width when the logo is hidden.
-const H_INSET: u16 = 2;
+/// Horizontal padding between the welcome content and the box border.
+const CONTENT_H_PAD: u16 = 2;
 
-/// Horizontal gap (cols) between the logo and the right column inside the box.
+/// Legacy padding retained for compatibility if artwork is reintroduced.
 const LOGO_H_PAD: u16 = 3;
 
 /// Rows the promo upgrade CTA reserves in the info slot: a spacer row above the
@@ -54,9 +53,8 @@ fn right_col_height(menu_height: u16, info_height: u16) -> u16 {
 
 /// Minimum content-area height the hero box needs to render without truncating:
 /// the optional error row, the box, a one-row flex gap, and the fixed rows
-/// below (tip + prompt + version). The box always shows the full-height logo,
-/// so a terminal shorter than this falls back to the stacked layout instead of
-/// overflowing.
+/// below (tip + prompt + version). A terminal shorter than this falls back to
+/// the stacked layout instead of overflowing.
 pub(super) fn min_content_height(
     error_height: u16,
     menu_height: u16,
@@ -86,18 +84,17 @@ pub(super) fn clamp_info_height(
         .unwrap_or(0)
 }
 
-/// Width (cols) of the hero box's left (logo) column, including padding.
-/// Collapses to a small inset when the logo is hidden.
+/// Width (cols) of the hero box's former logo column.
 fn left_col_width() -> u16 {
     let logo_width = super::logo::full_logo_visual_width();
     if logo_width == 0 {
-        H_INSET
+        0
     } else {
         logo_width + LOGO_H_PAD.saturating_sub(1) + LOGO_H_PAD
     }
 }
 
-/// Compute the hero box layout: bordered box with logo left, version + menu right.
+/// Compute the bordered hero box layout.
 ///
 /// Sizes the in-box info slot here (the announcement clamped to fit, else the
 /// fixed `changelog_height`) so the renderer just draws into `hero_info`.
@@ -122,8 +119,10 @@ pub(super) fn compute_hero_box(
     let box_width = content_area.width.saturating_sub(6).min(120);
     let inner_width = box_width.saturating_sub(2);
     let left_col_width = left_col_width();
-    let right_width = inner_width.saturating_sub(left_col_width);
-    let info_slot_width = right_width.saturating_sub(H_INSET);
+    let right_width = inner_width
+        .saturating_sub(left_col_width)
+        .saturating_sub(CONTENT_H_PAD * 2);
+    let info_slot_width = right_width;
     let info_height = match announcement {
         Some(ann) => clamp_info_height(
             announcement_desired_rows(ann, info_slot_width, expanded, has_upgrade_cta),
@@ -143,8 +142,8 @@ pub(super) fn compute_hero_box(
     let gap_after_error = if error_height > 0 { 1 } else { 0 };
     let fixed_above = gap_after_error + error_height;
 
-    // Top padding for vertical centering (use the default menu height so the
-    // logo position stays constant regardless of picker/focus state).
+    // Top padding for vertical centering, using the default menu height so the
+    // content position stays constant regardless of picker/focus state.
     let default_menu_height = 4u16;
     let default_inner = logo_rows.max(right_col_height(default_menu_height, info_height));
     let default_hero = 2 + V_PAD * 2 + default_inner;
@@ -206,8 +205,7 @@ pub(super) fn compute_hero_box(
         height: inner_height,
     };
 
-    // Left column: balanced padding around the logo; collapses to a small
-    // inset when the logo is hidden.
+    // The left column collapses completely now that the logo is absent.
     let logo_width = super::logo::full_logo_visual_width();
     // Logo body leans right; shave a column off the left pad to optically center.
     let logo_left_pad = LOGO_H_PAD.saturating_sub(1);
@@ -221,7 +219,7 @@ pub(super) fn compute_hero_box(
     };
 
     // Right column: rest of inner width after left column.
-    let right_x = inner.x + left_col_width;
+    let right_x = inner.x + left_col_width + CONTENT_H_PAD;
 
     // Version line at top of right column.
     let hero_version = Rect {
@@ -298,7 +296,7 @@ pub(super) struct HeroBoxRects {
     pub(super) upgrade_cta_rect: Option<Rect>,
 }
 
-/// Render the bordered hero box with logo left, version + subtitle + menu right.
+/// Render the bordered hero box with version, subtitle, and menu.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_hero_box(
     layout: &WelcomeLayout,

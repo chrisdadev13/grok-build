@@ -40,8 +40,7 @@ async fn out_of_band_stale_row_heals_on_focus_gained() {
 
     h.wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
         .expect("welcome screen");
-    // Let the initial draws land before injecting. The Welcome logo shimmers, so
-    // the screen never goes fully frame-idle, but the col-1 marker below is safe.
+    // Let the initial draws land before injecting.
     h.update(Duration::from_millis(800));
     assert!(
         !h.contains_text(STALE_MARKER),
@@ -49,9 +48,9 @@ async fn out_of_band_stale_row_heals_on_focus_gained() {
     );
 
     // Simulate the out-of-band reflow: write a stale row straight into the
-    // virtual screen at col 1 — the static left margin grok's diff renderer
-    // doesn't repaint during the logo shimmer. The heal is a full clear, so
-    // removal is reliable. `\x1b[<row>;<col>H` is 1-based cursor positioning.
+    // virtual screen at col 1, outside cells changed by normal diff renders.
+    // The heal is a full clear, so removal is reliable. `\x1b[<row>;<col>H`
+    // is 1-based cursor positioning.
     h.feed_screen(format!("\x1b[6;1H{STALE_MARKER}").as_bytes());
     assert!(
         h.contains_text(STALE_MARKER),

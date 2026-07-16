@@ -3,7 +3,7 @@
 //! Layout (top to bottom):
 //! - Top margin row (always preserved)
 //! - Top bar: repo_root:branch (left), version (right)
-//! - Vertically centered content: logo → gap → menu → gap → prompt
+//! - Vertically centered content: menu → gap → prompt
 //! - Bottom margin
 
 use ratatui::buffer::Buffer;
@@ -22,7 +22,6 @@ mod menu;
 mod prompt;
 mod top_bar;
 
-pub(crate) use logo::shimmer_frame;
 use logo::{logo_line_count, render_logo};
 use menu::render_menu;
 pub(crate) use top_bar::location_line_at;
@@ -160,7 +159,7 @@ struct WelcomeLayoutInput<'a> {
     tip_height: u16,
     /// Desired changelog height (collapsed to 0 if the terminal is too short).
     changelog_height: u16,
-    /// Vertical compaction (session picker visible): skip the logo + info slot.
+    /// Vertical compaction (session picker visible): skip the info slot.
     compact: bool,
     /// Horizontal-inset compaction (appearance setting) for the stacked slot.
     prompt_compact: bool,
@@ -172,7 +171,7 @@ struct WelcomeLayoutInput<'a> {
 }
 
 impl WelcomeLayout {
-    /// Whether the hero box (side-by-side logo + menu inside a border) is active.
+    /// Whether the bordered hero box is active.
     pub(super) fn has_hero_box(&self) -> bool {
         self.hero_box.width > 0 && self.hero_box.height > 0
     }
@@ -206,8 +205,8 @@ impl WelcomeLayout {
     /// Compute the welcome screen layout, forced to the stacked variant.
     ///
     /// The blocked screens (login, ZDR gate) render through
-    /// `render_welcome_blocked`, which only paints the stacked `logo`/`menu`
-    /// rects (and never an announcement). The hero-box layout zeroes those, so
+    /// `render_welcome_blocked`, which only paints the stacked menu rect (and
+    /// never an announcement). The hero-box layout zeroes it, so
     /// the blocked path must stay stacked regardless of terminal size.
     fn compute_stacked(input: WelcomeLayoutInput<'_>) -> Self {
         Self::compute_inner(input, false)
@@ -283,18 +282,13 @@ impl WelcomeLayout {
             None => changelog_height,
         };
 
-        // Stacked layout: skip the logo in compact mode (the session picker
-        // needs the space); otherwise pick small/full/none by height.
-        let logo_rows = if compact {
-            0
-        } else {
-            logo_line_count(content_area.height)
-        };
+        let logo_rows = logo_line_count(content_area.height);
 
         let gap_after_logo = if error_height > 0 { 1 } else { 0 };
         let tip_gap = if tip_height > 0 { 1u16 } else { 0 };
         let fixed_below = Self::fixed_below(tip_height);
-        let fixed_above = logo_rows + 1 + gap_after_logo + error_height; // +1 for gap after logo
+        let logo_gap = u16::from(logo_rows > 0);
+        let fixed_above = logo_rows + logo_gap + gap_after_logo + error_height;
         // The stacked info slot below the menu holds whichever block is shown
         // (announcement or changelog), matching the hero box's single-slot rule.
         let (eff_changelog_height, _) = if !compact {
@@ -309,8 +303,8 @@ impl WelcomeLayout {
             (0, 0)
         };
         let eff_changelog_gap = if eff_changelog_height > 0 { 1u16 } else { 0 };
-        // Compute top_pad using the *default* menu height (4 items = 7 rows) so
-        // the logo position stays constant regardless of picker/focus state.
+        // Compute top_pad using the default menu height so the content position
+        // stays constant regardless of picker/focus state.
         let top_pad = if compact {
             0
         } else {
@@ -322,7 +316,6 @@ impl WelcomeLayout {
                 .saturating_sub(fixed_below)
                 / 3
         };
-        let logo_gap = 1u16;
         let flex_gap = 1u16;
         let [
             _,
@@ -837,10 +830,9 @@ pub fn render_welcome(
     result
 }
 
-/// Render a blocked welcome screen: logo + optional message + menu + version.
+/// Render a blocked welcome screen: optional message + menu + version.
 ///
 /// Used for both the login screen (Pending) and the ZDR gate. The layout is:
-///   Logo
 ///   {message}
 ///   Menu items
 ///   {prompt}      (optional)
@@ -860,8 +852,8 @@ fn render_welcome_blocked(
 
     let msg_height = if message.is_some() { 2u16 } else { 0u16 };
     let menu_height = menu_items.len() as u16;
-    // Force the stacked layout: this renderer only paints the stacked
-    // logo/menu rects, which the hero-box layout would leave empty.
+    // Force the stacked layout: this renderer only paints the stacked menu
+    // rect, which the hero-box layout would leave empty.
     let layout = WelcomeLayout::compute_stacked(WelcomeLayoutInput {
         content_area,
         error_height: msg_height,
@@ -922,7 +914,7 @@ fn render_welcome_blocked(
 }
 
 /// Render the folder-trust question. Mirrors [`render_welcome_blocked`]'s
-/// stacked layout (logo + message + menu + version badge), but the message is a
+/// stacked layout (message + menu + version badge), but the message is a
 /// multi-line block showing the workspace path and the warning that Grok Build
 /// may run or modify contents in this directory (a security risk). The y/N
 /// answer is handled by the welcome input interceptor, so this only paints;
@@ -1599,7 +1591,8 @@ fn stacked_info_budget(
     }
     let logo_rows = logo_line_count(content_area.height);
     let gap_after_logo = if error_height > 0 { 1u16 } else { 0 };
-    let fixed_above = logo_rows + 1 + gap_after_logo + error_height;
+    let logo_gap = u16::from(logo_rows > 0);
+    let fixed_above = logo_rows + logo_gap + gap_after_logo + error_height;
     let fixed_below = WelcomeLayout::fixed_below(tip_height);
     // +1 info-slot gap, +1 min flex gap above the tip.
     content_area
@@ -1815,7 +1808,7 @@ fn render_welcome_done(
         );
         (vec![], Some(hit_areas))
     } else if layout.has_hero_box() {
-        // Wide layout: render bordered hero box with logo left, version + menu right.
+        // Wide layout: render the bordered hero box.
         let rects = hero_box::render_hero_box(
             &layout,
             buf,
@@ -1835,8 +1828,8 @@ fn render_welcome_done(
         upgrade_cta_rect = rects.upgrade_cta_rect;
         (rects.menu_rects, None)
     } else {
-        // Narrow layout: stacked logo above, menu below. Inset the menu the
-        // same as the input bar (`prompt_inset`) so it keeps side spacing
+        // Narrow layout: inset the menu like the input bar (`prompt_inset`) so
+        // it keeps side spacing
         // instead of touching the window edge on narrow terminals.
         render_logo(layout.logo, buf, theme, content_area.height);
         let menu_area = inset_horizontal(layout.menu, prompt::prompt_inset(p.compact));
@@ -3043,11 +3036,11 @@ mod tests {
 
     #[test]
     fn changelog_boundary_exact_fit() {
-        // No logo at h < 22. fixed_above = 0 + 1 + 0 + 0 = 1.
+        // fixed_above = 0 because there is no logo, gap, or error.
         // fixed_below = 0 (tip) + 0 (tip_gap) + 3 (prompt) + 1 (ver_gap) + 1 (ver) = 5.
-        // min_without_changelog = 1 + 4 (menu) + 1 (flex) + 5 = 11.
-        // changelog slot = 1 (gap) + 5 (height) = 6. Threshold = 11 + 6 = 17.
-        let just_fits = Rect::new(0, 0, 80, 17);
+        // min_without_changelog = 4 (menu) + 1 (flex) + 5 = 10.
+        // changelog slot = 1 (gap) + 5 (height) = 6. Threshold = 16.
+        let just_fits = Rect::new(0, 0, 80, 16);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: just_fits,
             menu_height: 4,
@@ -3056,7 +3049,7 @@ mod tests {
         });
         assert_eq!(layout.changelog.height, 5);
 
-        let too_short = Rect::new(0, 0, 80, 16);
+        let too_short = Rect::new(0, 0, 80, 15);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: too_short,
             menu_height: 4,
@@ -3069,9 +3062,9 @@ mod tests {
     #[test]
     fn changelog_hidden_when_tip_steals_space() {
         // Use narrow width to avoid hero box path, keeping stacked layout.
-        // With tip_height=2: fixed_below(2) = 8. min = 1 + 4 + 1 + 8 = 14.
-        // Threshold = 14 + 6 = 20. At h=19 the tip pushes changelog out.
-        let with_tip = Rect::new(0, 0, 60, 19);
+        // With tip_height=2: fixed_below(2) = 8. min = 4 + 1 + 8 = 13.
+        // Threshold = 13 + 6 = 19. At h=18 the tip pushes changelog out.
+        let with_tip = Rect::new(0, 0, 60, 18);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: with_tip,
             menu_height: 4,
@@ -3081,8 +3074,8 @@ mod tests {
         });
         assert_eq!(layout.changelog.height, 0);
 
-        // Same size without tip: threshold = 17 <= 19, changelog fits.
-        let without_tip = Rect::new(0, 0, 60, 19);
+        // Same size without tip: threshold = 16 <= 18, changelog fits.
+        let without_tip = Rect::new(0, 0, 60, 18);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: without_tip,
             menu_height: 4,
@@ -3104,11 +3097,12 @@ mod tests {
         assert!(layout.has_hero_box(), "hero box should be active at 90x50");
         assert!(layout.hero_box.width > 0);
         assert!(layout.hero_box.height > 0);
-        // Logo and menu slots are zero in hero box mode (content is inside the box).
+        // Stacked slots are zero in hero box mode (content is inside the box).
         assert_eq!(layout.logo.width, 0);
         assert_eq!(layout.menu.width, 0);
-        // Sub-rects inside the hero box are valid.
-        assert!(layout.hero_logo.height > 0);
+        // Content sub-rects inside the hero box are valid; the former logo slot
+        // is collapsed.
+        assert_eq!(layout.hero_logo.height, 0);
         assert!(layout.hero_menu.height > 0);
         assert_eq!(layout.hero_version.height, 1);
     }
@@ -3190,11 +3184,9 @@ mod tests {
 
     #[test]
     fn hero_box_inactive_when_warning_would_overflow() {
-        // Regression: the box is forced to the full 7-row logo, so even a
-        // 3-item menu needs 11 box rows. A startup warning (error_height = 2)
-        // pushes the total past height 19, so the gate must fall back to the
-        // stacked layout instead of overflowing by a row.
-        let area = Rect::new(0, 0, 90, 19);
+        // A startup warning must still be included in the fit calculation now
+        // that box height is driven by the menu rather than logo artwork.
+        let area = Rect::new(0, 0, 90, 18);
         let with_warning = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
             error_height: 2,
@@ -3214,8 +3206,8 @@ mod tests {
     #[test]
     fn blocked_layout_stays_stacked_on_wide_terminal() {
         // The login / ZDR screens render through render_welcome_blocked, which
-        // only paints the stacked logo/menu rects. compute_stacked must never
-        // hand them a hero-box layout (which zeroes those rects), even on a
+        // only paints the stacked menu rect. compute_stacked must never hand
+        // them a hero-box layout (which zeroes that rect), even on a
         // wide, tall terminal where the normal path picks the hero box.
         let area = Rect::new(0, 0, 120, 40);
         assert!(
@@ -3233,10 +3225,7 @@ mod tests {
             ..Default::default()
         });
         assert!(!blocked.has_hero_box());
-        assert!(
-            blocked.logo.height > 0,
-            "logo must be painted on the login screen"
-        );
+        assert_eq!(blocked.logo.height, 0);
         assert!(
             blocked.menu.height > 0,
             "menu must be painted on the login screen"
@@ -3276,9 +3265,8 @@ mod tests {
 
     #[test]
     fn hero_box_height_accounts_for_borders_and_padding() {
-        // At h >= 26, logo07 is used (7 lines). With menu_height=3:
-        // right_col = 2 + 0 + 0 + 1 + 3 = 6, inner = max(7, 6) = 7.
-        // hero_box_height = 2 (borders) + 2 (v_pad) + 7 = 11.
+        // With menu_height=3, the right column is 6 rows tall, so the box is
+        // borders(2) + vertical padding(2) + content(6) = 10 rows.
         let area = Rect::new(0, 0, 100, 50);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
@@ -3286,19 +3274,34 @@ mod tests {
             ..Default::default()
         });
         assert!(layout.has_hero_box());
-        assert_eq!(layout.hero_box.height, 11);
+        assert_eq!(layout.hero_box.height, 10);
     }
 
     #[test]
-    fn hero_box_logo_top_aligned() {
+    fn hero_box_logo_slot_is_collapsed() {
         let area = Rect::new(0, 0, 100, 50);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
             menu_height: 3,
             ..Default::default()
         });
-        // Logo y should be at hero_box.y + 1 (border) + 1 (v_pad).
-        assert_eq!(layout.hero_logo.y, layout.hero_box.y + 2);
+        assert_eq!(layout.hero_logo.height, 0);
+        assert_eq!(layout.hero_logo.width, 0);
+    }
+
+    #[test]
+    fn hero_box_content_has_horizontal_padding() {
+        let area = Rect::new(0, 0, 100, 50);
+        let layout = WelcomeLayout::compute(WelcomeLayoutInput {
+            content_area: area,
+            menu_height: 3,
+            ..Default::default()
+        });
+
+        // Border + two columns of content padding.
+        assert_eq!(layout.hero_version.x, layout.hero_box.x + 3);
+        assert_eq!(layout.hero_menu.x, layout.hero_version.x);
+        assert!(layout.hero_menu.x + layout.hero_menu.width < layout.hero_box.right());
     }
 
     #[test]
