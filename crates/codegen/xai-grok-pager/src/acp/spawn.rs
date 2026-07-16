@@ -30,6 +30,42 @@ pub struct SpawnedAgent {
     pub auth_manager: std::sync::Arc<AuthManager>,
 }
 
+/// Spawn the installed Codex CLI's app-server and expose it through ACP.
+pub fn spawn_codex(
+    codex_bin: Option<std::path::PathBuf>,
+    cancel: &CancellationToken,
+) -> Result<SpawnedAgent> {
+    let auth_manager = std::sync::Arc::new(AuthManager::new(&grok_home(), Default::default()));
+    let agent_cancel = cancel.child_token();
+    let (acp_client, acp_agent) = acp_channels();
+    let thread_cancel = agent_cancel.clone();
+    let executable = codex_bin.unwrap_or_else(|| "codex".into());
+    let handle = thread::Builder::new()
+        .name("codex-app-server-worker".into())
+        .spawn(move || -> Result<()> {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let local = tokio::task::LocalSet::new();
+            local.block_on(&rt, async move {
+                let gateway = AcpGatewaySender::new(acp_agent.tx.clone());
+                let agent = crate::acp::codex::CodexAgent::spawn(executable, gateway).await?;
+                let receiver =
+                    AcpGatewayReceiver::new(acp_agent.rx, Rc::new(agent)).with_tracing(true);
+                tokio::task::spawn_local(receiver.run());
+                thread_cancel.cancelled().await;
+                anyhow::Result::Ok(())
+            })
+        })?;
+
+    Ok(SpawnedAgent {
+        _thread_handle: handle,
+        channel: acp_client,
+        cancel: agent_cancel,
+        auth_manager,
+    })
+}
+
 /// Spawn a GrokShell agent in a background thread.
 ///
 /// Returns the ACP client channel for communication and a cancellation token.

@@ -433,10 +433,15 @@ pub(super) fn render_version_badge(
     }
 
     let channel = xai_grok_update::channel_label();
+    let product = if crate::app::cli::is_codex_ui() {
+        "Codex TUI"
+    } else {
+        "Grok Build"
+    };
     match &mode {
         VersionBadgeMode::Full { .. } => {
             spans.push(Span::styled(
-                "Grok Build  ",
+                format!("{product}  "),
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD),
@@ -465,7 +470,7 @@ pub(super) fn render_version_badge(
         }
         VersionBadgeMode::HeroInline => {
             spans.push(Span::styled(
-                "Grok Build Beta  ",
+                format!("{product} Beta  "),
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD),

@@ -3,6 +3,7 @@
 //! Handles spawning the agent process, initializing the protocol,
 //! authenticating, and providing the channel for communication.
 
+pub mod codex;
 pub mod leader_bridge;
 pub mod meta;
 pub mod model_state;
@@ -18,6 +19,8 @@ use xai_acp_lib::{AcpAgentTx, AcpClientRx, acp_send};
 use xai_grok_shell::agent::auth_method::AuthMethodKind;
 use xai_grok_shell::agent::config::Config as AgentConfig;
 use xai_grok_shell::sampling::types::ReasoningEffort;
+
+use crate::app::cli::BackendKind;
 
 pub use model_state::ModelState;
 
@@ -100,6 +103,10 @@ pub struct AcpConnection {
 /// CLI flags that affect agent configuration, threaded from PagerArgs.
 #[derive(Debug, Clone, Default)]
 pub struct ConnectFlags {
+    /// Runtime selected by the entry point or `--provider`.
+    pub backend: BackendKind,
+    /// Optional path to the `codex` executable.
+    pub codex_bin: Option<std::path::PathBuf>,
     pub subagents: bool,
     pub experimental_memory: bool,
     pub no_memory: bool,
@@ -150,6 +157,9 @@ pub struct ConnectFlags {
 /// This is the main entry point for establishing an ACP connection.
 /// After this returns, the agent is ready to create sessions and receive prompts.
 pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<AcpConnection> {
+    if flags.backend == BackendKind::Codex {
+        return connect_codex(cancel, &flags).await;
+    }
     // Load agent config from disk
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
@@ -209,6 +219,53 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
     let (needs_login, login_label, login_method_id, auth_start_mode) =
         startup_auth_metadata(&auth_methods);
 
+    let (needs_login, login_label, login_method_id, auth_start_mode, auth_meta) =
+        eager_auth_or_login_fallback(
+            &tx,
+            &auth_methods,
+            default_auth_method_id.as_ref(),
+            needs_login,
+            login_label,
+            login_method_id,
+            auth_start_mode,
+        )
+        .await;
+
+    Ok(AcpConnection {
+        tx,
+        rx,
+        models,
+        is_grok_shell,
+        auth_methods,
+        cancel: spawned.cancel,
+        available_commands,
+        needs_login,
+        login_label,
+        login_method_id,
+        auth_start_mode,
+        auth_meta,
+        leader_status_rx: None,
+        cancel_rewind_enabled,
+        session_recap_available,
+        auth_manager,
+    })
+}
+
+async fn connect_codex(cancel: &CancellationToken, flags: &ConnectFlags) -> Result<AcpConnection> {
+    let spawned = spawn::spawn_codex(flags.codex_bin.clone(), cancel)?;
+    let auth_manager = spawned.auth_manager.clone();
+    let (tx, rx) = (spawned.channel.tx, spawned.channel.rx);
+    let (
+        models,
+        is_grok_shell,
+        auth_methods,
+        default_auth_method_id,
+        available_commands,
+        cancel_rewind_enabled,
+        session_recap_available,
+    ) = initialize(&tx, flags).await?;
+    let (needs_login, login_label, login_method_id, auth_start_mode) =
+        startup_auth_metadata(&auth_methods);
     let (needs_login, login_label, login_method_id, auth_start_mode, auth_meta) =
         eager_auth_or_login_fallback(
             &tx,

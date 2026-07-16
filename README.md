@@ -62,6 +62,7 @@ Requirements:
 
 ```sh
 cargo run -p xai-grok-pager-bin              # build + launch the TUI
+cargo run -p xai-grok-pager-bin --bin codex-tui # launch with Codex app-server
 cargo build -p xai-grok-pager-bin --release  # release binary: target/release/xai-grok-pager
 cargo check -p xai-grok-pager-bin            # fast validation
 ```
@@ -69,6 +70,11 @@ cargo check -p xai-grok-pager-bin            # fast validation
 The binary artifact is named `xai-grok-pager`; official installs ship it as
 `grok`. On first launch it opens your browser to authenticate — see the
 [authentication guide](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md).
+
+The `codex-tui` binary uses the installed `codex app-server`, preserves the
+original Grok binary, and keeps its UI state under `~/.codex-tui`. Install and
+sign in to the Codex CLI first (`codex login`), or use the browser sign-in shown
+by the TUI. Pass `--codex-bin <path>` when `codex` is not on `PATH`.
 
 ## Documentation
 

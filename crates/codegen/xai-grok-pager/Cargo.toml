@@ -54,6 +54,7 @@ portable-pty = "0.9"
 # Utilities
 derive_more = { workspace = true, features = ["deref", "deref_mut"] }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 clap_complete = { workspace = true }
 rand = { workspace = true }
@@ -65,6 +66,7 @@ tokio = { workspace = true, features = [
     "signal",
     "io-util",
     "io-std",
+    "process",
 ] }
 tokio-util = { workspace = true, features = ["compat"] }
 tracing = { workspace = true }
@@ -130,6 +132,7 @@ git2 = { version = "0.20", default-features = false, features = [
     "vendored-libgit2",
 ] }
 urlencoding = { workspace = true }
+webbrowser = { workspace = true }
 
 # Parsing (web_search)
 url = { workspace = true }

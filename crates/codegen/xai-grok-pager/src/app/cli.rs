@@ -1,9 +1,125 @@
 //! CLI argument parsing for the pager.
 pub use crate::headless::OutputFormat;
-use clap::{ArgAction, Parser, Subcommand, ValueHint};
+use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum, ValueHint};
 use clap_complete::Shell;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+
+/// Agent runtime used behind the pager UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "lower")]
+pub enum BackendKind {
+    Codex,
+    Grok,
+}
+
+impl Default for BackendKind {
+    fn default() -> Self {
+        Self::Grok
+    }
+}
+
+impl BackendKind {
+    /// Default the dedicated Codex entry point to Codex while preserving the
+    /// historical Grok binary's behavior.
+    pub fn for_executable(executable: &str) -> Self {
+        let name = std::path::Path::new(executable)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(executable);
+        if name.eq_ignore_ascii_case("codex-tui") || name.eq_ignore_ascii_case("codex-tui.exe") {
+            Self::Codex
+        } else {
+            Self::Grok
+        }
+    }
+}
+
+/// Give the Codex entry point its own UI state directory and import neutral
+/// appearance settings once from an existing Grok installation.
+pub fn prepare_codex_home() -> anyhow::Result<()> {
+    let target = std::env::var_os("CODEX_TUI_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::home_dir().map(|home| home.join(".codex-tui")))
+        .ok_or_else(|| anyhow::anyhow!("unable to determine Codex TUI home directory"))?;
+    std::fs::create_dir_all(&target)?;
+
+    let marker = target.join(".ui-import-v1");
+    if !marker.exists() {
+        if let Some(home) = std::env::home_dir() {
+            let source = home.join(".grok");
+            import_neutral_settings(&source, &target)?;
+        }
+        std::fs::write(&marker, b"imported\n")?;
+    }
+    // SAFETY: called at process startup before worker threads are created.
+    unsafe { std::env::set_var("GROK_HOME", target) };
+    Ok(())
+}
+
+/// Whether this process is presenting the Codex-branded interactive surface.
+pub fn is_codex_ui() -> bool {
+    std::env::var_os("CODEX_TUI_MODE").is_some()
+}
+
+fn import_neutral_settings(
+    source: &std::path::Path,
+    target: &std::path::Path,
+) -> anyhow::Result<()> {
+    let source_config = source.join("config.toml");
+    let target_config = target.join("config.toml");
+    if !target_config.exists()
+        && let Ok(contents) = std::fs::read_to_string(source_config)
+        && let Ok(parsed) = contents.parse::<toml::Value>()
+        && let Some(ui) = parsed.get("ui").and_then(toml::Value::as_table)
+    {
+        const NEUTRAL_UI_KEYS: &[&str] = &[
+            "max_thoughts_width",
+            "theme",
+            "ui_theme",
+            "compact_mode",
+            "simple_mode",
+            "show_timestamps",
+            "auto_dark_theme",
+            "auto_light_theme",
+            "scroll_speed",
+            "scroll_mode",
+            "invert_scroll",
+            "scroll_lines",
+            "vim_mode",
+            "render_mermaid",
+            "mouse_reporting_toggle",
+            "keep_text_selection",
+            "selection_highlight_duration_ms",
+            "show_thinking_blocks",
+            "group_tool_verbs",
+            "collapsed_edit_blocks",
+            "prompt_suggestions",
+            "cursor_blink",
+            "screen_mode",
+            "double_click_action",
+            "contextual_hints",
+            "display_refresh",
+        ];
+        let neutral_ui = ui
+            .iter()
+            .filter(|(key, _)| NEUTRAL_UI_KEYS.contains(&key.as_str()))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let mut root = toml::map::Map::new();
+        root.insert("ui".to_string(), toml::Value::Table(neutral_ui));
+        std::fs::write(
+            target_config,
+            toml::to_string_pretty(&toml::Value::Table(root))?,
+        )?;
+    }
+    let source_pager = source.join("pager.toml");
+    let target_pager = target.join("pager.toml");
+    if !target_pager.exists() && source_pager.is_file() {
+        std::fs::copy(source_pager, target_pager)?;
+    }
+    Ok(())
+}
 /// Top-level commands for the pager binary.
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
@@ -408,6 +524,12 @@ pub struct PagerArgs {
     /// Working directory.
     #[arg(long)]
     pub cwd: Option<PathBuf>,
+    /// Agent runtime to use behind the terminal UI.
+    #[arg(long, value_enum, global = true)]
+    pub provider: Option<BackendKind>,
+    /// Path to the Codex CLI executable used for `codex app-server`.
+    #[arg(long = "codex-bin", value_name = "PATH", global = true)]
+    pub codex_bin: Option<PathBuf>,
     /// Use a custom leader socket path instead of the default `~/.grok/leader.sock`.
     #[arg(
         long = "leader-socket",
@@ -746,18 +868,41 @@ pub enum ResumeTarget {
     None,
 }
 impl PagerArgs {
+    /// Resolve the explicit provider or the default for the invoked executable.
+    pub fn backend(&self) -> BackendKind {
+        self.provider.unwrap_or_else(|| {
+            BackendKind::for_executable(
+                &std::env::args()
+                    .next()
+                    .unwrap_or_else(|| "grok".to_string()),
+            )
+        })
+    }
+
     /// Parse CLI arguments and apply `--cwd` if provided.
     pub fn parse_and_apply_cwd() -> anyhow::Result<Self> {
-        let bin_name = std::env::args()
+        let actual_bin_name = std::env::args()
             .next()
-            .as_deref()
-            .map(std::path::Path::new)
-            .and_then(|p| p.file_name())
+            .unwrap_or_else(|| "grok".to_string());
+        let bin_name = std::path::Path::new(&actual_bin_name)
+            .file_name()
             .and_then(|n| n.to_str())
-            .filter(|n| *n == "grok" || *n == "agent")
+            .filter(|n| *n == "grok" || *n == "agent" || *n == "codex-tui")
             .unwrap_or("grok")
             .to_owned();
-        let mut args = Self::parse_from(std::iter::once(bin_name).chain(std::env::args().skip(1)));
+        let is_codex = BackendKind::for_executable(&actual_bin_name) == BackendKind::Codex;
+        let command_name = if is_codex { "codex-tui" } else { "grok" };
+        let command = Self::command().name(command_name).about(if is_codex {
+            "Codex TUI"
+        } else {
+            "Grok Build TUI"
+        });
+        let matches =
+            command.get_matches_from(std::iter::once(bin_name).chain(std::env::args().skip(1)));
+        let mut args = Self::from_arg_matches(&matches).expect("clap matches PagerArgs");
+        if args.provider.is_none() {
+            args.provider = Some(BackendKind::for_executable(&actual_bin_name));
+        }
         if let Some(socket) = args.leader_socket.take() {
             args.leader_socket = Some(std::path::absolute(&socket).unwrap_or(socket));
         }
@@ -880,6 +1025,40 @@ impl PagerArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn provider_flag_selects_codex_or_grok() {
+        let codex = PagerArgs::try_parse_from(["grok", "--provider", "codex"])
+            .expect("codex provider parses");
+        assert_eq!(codex.provider, Some(BackendKind::Codex));
+
+        let grok = PagerArgs::try_parse_from(["codex-tui", "--provider", "grok"])
+            .expect("grok provider parses");
+        assert_eq!(grok.provider, Some(BackendKind::Grok));
+    }
+
+    #[test]
+    fn executable_name_sets_provider_default() {
+        assert_eq!(BackendKind::for_executable("codex-tui"), BackendKind::Codex);
+        assert_eq!(
+            BackendKind::for_executable("/usr/local/bin/grok"),
+            BackendKind::Grok
+        );
+    }
+    #[test]
+    fn codex_import_keeps_appearance_but_not_provider_settings() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let target = tempfile::tempdir().expect("target tempdir");
+        std::fs::write(
+            source.path().join("config.toml"),
+            "[ui]\ntheme = \"Grok Night\"\nvoice_stt_language = \"es\"\nfork_secondary_model = \"grok-test\"\n",
+        )
+        .unwrap();
+        import_neutral_settings(source.path(), target.path()).unwrap();
+        let imported = std::fs::read_to_string(target.path().join("config.toml")).unwrap();
+        assert!(imported.contains("theme"));
+        assert!(!imported.contains("voice_stt_language"));
+        assert!(!imported.contains("fork_secondary_model"));
+    }
     #[test]
     fn version_flag_exits_zero() {
         let err = PagerArgs::try_parse_from(["grok", "--version"]).unwrap_err();

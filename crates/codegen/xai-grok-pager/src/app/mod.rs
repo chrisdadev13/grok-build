@@ -391,22 +391,26 @@ pub async fn run(
     let screen_mode_override = screen_mode_relaunch::take_screen_mode_env_override();
     let cancel = CancellationToken::new();
     let startup_start = std::time::Instant::now();
+    let backend = args.backend();
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-    let grok_com_config =
-        match xai_grok_shell::agent::config::Config::new_from_toml_cfg(&raw_config) {
-            Ok(c) => c.grok_com_config,
-            Err(e) => {
-                tracing::warn!(
-                    error = % e, "failed to parse config for auth refresh, using defaults"
-                );
-                xai_grok_shell::auth::GrokComConfig::default()
-            }
-        };
-    let refreshed_auth = xai_grok_shell::auth::try_ensure_fresh_auth(&grok_com_config).await;
-    let early_prefetch =
-        xai_grok_shell::agent::models::start_early_prefetch_with_auth(refreshed_auth);
-    xai_grok_shell::agent::mvp_agent::warm_async_http_client();
+    let early_prefetch = if backend == cli::BackendKind::Grok {
+        let grok_com_config =
+            match xai_grok_shell::agent::config::Config::new_from_toml_cfg(&raw_config) {
+                Ok(c) => c.grok_com_config,
+                Err(e) => {
+                    tracing::warn!(
+                        error = % e, "failed to parse config for auth refresh, using defaults"
+                    );
+                    xai_grok_shell::auth::GrokComConfig::default()
+                }
+            };
+        let refreshed_auth = xai_grok_shell::auth::try_ensure_fresh_auth(&grok_com_config).await;
+        xai_grok_shell::agent::mvp_agent::warm_async_http_client();
+        xai_grok_shell::agent::models::start_early_prefetch_with_auth(refreshed_auth)
+    } else {
+        None
+    };
     tokio::task::spawn_blocking(|| {});
     if let Ok(cwd) = std::env::current_dir() {
         crate::git_info::populate_from_cwd_async(cwd);
@@ -419,13 +423,17 @@ pub async fn run(
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
     let prefetch_elapsed = startup_start.elapsed();
-    let (use_leader, policy_disable_reason) = resolve_use_leader(
-        args.leader,
-        args.no_leader,
-        &raw_config,
-        remote_settings.as_ref(),
-        true,
-    );
+    let (use_leader, policy_disable_reason) = if backend == cli::BackendKind::Codex {
+        (false, None)
+    } else {
+        resolve_use_leader(
+            args.leader,
+            args.no_leader,
+            &raw_config,
+            remote_settings.as_ref(),
+            true,
+        )
+    };
     tracing::info!(
         use_leader,
         ?policy_disable_reason,
@@ -456,11 +464,38 @@ pub async fn run(
     let intent = args
         .session_startup_intent()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let materialized = session_startup::materialize_startup(
-        session_startup::MaterializeCtx::from_pager_args(&args),
-        intent,
-    )
-    .await?;
+    let materialized = if backend == cli::BackendKind::Codex {
+        match intent {
+            session_startup::SessionStartupIntent::NewAuto => {
+                session_startup::MaterializedStartup::NewAuto
+            }
+            session_startup::SessionStartupIntent::Resume {
+                session_id: Some(session_id),
+                ..
+            } => session_startup::MaterializedStartup::Resume {
+                session_id,
+                original_cwd: None,
+                title: None,
+            },
+            session_startup::SessionStartupIntent::Resume {
+                session_id: None, ..
+            } => anyhow::bail!(
+                "Codex --continue is not supported yet; use /resume to pick a Codex thread"
+            ),
+            session_startup::SessionStartupIntent::NewWithId { .. } => anyhow::bail!(
+                "--session-id is not supported by Codex app-server; start a normal new thread"
+            ),
+            session_startup::SessionStartupIntent::ForkFrom { .. } => {
+                anyhow::bail!("--fork-session is not supported by the Codex TUI yet")
+            }
+        }
+    } else {
+        session_startup::materialize_startup(
+            session_startup::MaterializeCtx::from_pager_args(&args),
+            intent,
+        )
+        .await?
+    };
     if args.chat()
         && let session_startup::MaterializedStartup::Resume { session_id, .. } = &materialized
     {
@@ -532,6 +567,8 @@ pub async fn run(
         remote_permission_mode,
     );
     let connect_flags = crate::acp::ConnectFlags {
+        backend,
+        codex_bin: args.codex_bin.clone(),
         subagents: !args.no_subagents,
         experimental_memory: args.experimental_memory,
         no_memory: args.no_memory,
@@ -709,12 +746,17 @@ pub async fn run(
 /// Plain-quit "Resume this session with…" lines (after terminal restore).
 /// Best-effort: closed-pane EIO/BrokenPipe must not panic (`panic = "abort"`).
 fn print_exit_resume_hint(session_id: &str, minimal: bool, w: &mut impl Write) {
+    let binary = if cli::is_codex_ui() {
+        "codex-tui"
+    } else {
+        "grok"
+    };
     let _ = writeln!(w);
     let _ = writeln!(w, "Resume this session with:");
     if minimal {
-        let _ = writeln!(w, "  grok --minimal --resume {session_id}");
+        let _ = writeln!(w, "  {binary} --minimal --resume {session_id}");
     } else {
-        let _ = writeln!(w, "  grok --resume {session_id}");
+        let _ = writeln!(w, "  {binary} --resume {session_id}");
     }
 }
 /// Screen-mode relaunch failure fallback (same quit tail as plain resume).
@@ -1269,12 +1311,13 @@ pub(crate) fn set_terminal_title(title: &str) {
 /// terminate the OSC early and let the remainder inject arbitrary escape
 /// sequences into the terminal.
 fn terminal_title_string(title: &str) -> String {
+    let product = if cli::is_codex_ui() { "codex" } else { "grok" };
     let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
     if sanitized.is_empty() {
-        "grok".into()
+        product.into()
     } else {
-        let truncated: String = sanitized.chars().take(80 - 6).collect();
-        format!("{} - grok", truncated)
+        let truncated: String = sanitized.chars().take(80 - product.len() - 3).collect();
+        format!("{truncated} - {product}")
     }
 }
 fn set_panic_hook(mode: ScreenMode) {

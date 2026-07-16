@@ -1455,6 +1455,31 @@ fn install_heap_profile_hooks() {
 }
 fn main() {
     xai_grok_pager_minimal::install();
+    let argv: Vec<String> = std::env::args().collect();
+    let explicit_provider = argv.iter().skip(1).enumerate().find_map(|(index, arg)| {
+        arg.strip_prefix("--provider=")
+            .map(str::to_owned)
+            .or_else(|| {
+                (arg == "--provider")
+                    .then(|| argv.get(index + 2).cloned())
+                    .flatten()
+            })
+    });
+    let executable_defaults_to_codex = argv.first().is_some_and(|executable| {
+        xai_grok_pager::app::cli::BackendKind::for_executable(executable)
+            == xai_grok_pager::app::cli::BackendKind::Codex
+    });
+    let codex_mode = explicit_provider
+        .as_deref()
+        .map_or(executable_defaults_to_codex, |provider| provider == "codex");
+    if codex_mode {
+        // SAFETY: set before worker threads are created.
+        unsafe { std::env::set_var("CODEX_TUI_MODE", "1") };
+    }
+    if codex_mode && let Err(error) = xai_grok_pager::app::cli::prepare_codex_home() {
+        eprintln!("Couldn't initialize Codex TUI state: {error:#}");
+        std::process::exit(1);
+    }
     #[cfg(all(feature = "jemalloc", unix))]
     xai_grok_pager::memory_release::install_release_hook(purge_jemalloc_retained_pages);
     #[cfg(all(feature = "jemalloc", unix))]
@@ -1471,7 +1496,7 @@ fn main() {
         xai_grok_shell::util::grok_home::grok_home().join("memtrace"),
     );
     raise_fd_limit();
-    if let Err(e) = xai_grok_config::validate_requirements() {
+    if !codex_mode && let Err(e) = xai_grok_config::validate_requirements() {
         eprintln!("Couldn't start Grok: {e}");
         eprintln!();
         eprintln!(
