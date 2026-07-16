@@ -33,6 +33,7 @@ pub struct SpawnedAgent {
 /// Spawn the installed Codex CLI's app-server and expose it through ACP.
 pub fn spawn_codex(
     codex_bin: Option<std::path::PathBuf>,
+    openai_docs_mcp: bool,
     cancel: &CancellationToken,
 ) -> Result<SpawnedAgent> {
     let auth_manager = std::sync::Arc::new(AuthManager::new(&grok_home(), Default::default()));
@@ -49,7 +50,9 @@ pub fn spawn_codex(
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
                 let gateway = AcpGatewaySender::new(acp_agent.tx.clone());
-                let agent = crate::acp::codex::CodexAgent::spawn(executable, gateway).await?;
+                let agent =
+                    crate::acp::codex::CodexAgent::spawn(executable, gateway, openai_docs_mcp)
+                        .await?;
                 let receiver =
                     AcpGatewayReceiver::new(acp_agent.rx, Rc::new(agent)).with_tracing(true);
                 tokio::task::spawn_local(receiver.run());

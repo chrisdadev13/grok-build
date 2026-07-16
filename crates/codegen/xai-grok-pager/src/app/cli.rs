@@ -530,6 +530,10 @@ pub struct PagerArgs {
     /// Path to the Codex CLI executable used for `codex app-server`.
     #[arg(long = "codex-bin", value_name = "PATH", global = true)]
     pub codex_bin: Option<PathBuf>,
+    /// Keep the optional OpenAI Docs MCP enabled for Codex sessions.
+    /// It is disabled by default because its OAuth discovery can delay startup.
+    #[arg(long = "codex-openai-docs-mcp", global = true)]
+    pub codex_openai_docs_mcp: bool,
     /// Use a custom leader socket path instead of the default `~/.grok/leader.sock`.
     #[arg(
         long = "leader-socket",
@@ -1034,6 +1038,16 @@ mod tests {
         let grok = PagerArgs::try_parse_from(["codex-tui", "--provider", "grok"])
             .expect("grok provider parses");
         assert_eq!(grok.provider, Some(BackendKind::Grok));
+    }
+
+    #[test]
+    fn codex_docs_mcp_can_be_preserved_explicitly() {
+        let default = PagerArgs::try_parse_from(["codex-tui"]).unwrap();
+        assert!(!default.codex_openai_docs_mcp);
+
+        let enabled = PagerArgs::try_parse_from(["codex-tui", "--codex-openai-docs-mcp"])
+            .expect("Codex docs MCP flag parses");
+        assert!(enabled.codex_openai_docs_mcp);
     }
 
     #[test]

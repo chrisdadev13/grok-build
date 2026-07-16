@@ -569,6 +569,7 @@ pub async fn run(
     let connect_flags = crate::acp::ConnectFlags {
         backend,
         codex_bin: args.codex_bin.clone(),
+        codex_openai_docs_mcp: args.codex_openai_docs_mcp,
         subagents: !args.no_subagents,
         experimental_memory: args.experimental_memory,
         no_memory: args.no_memory,

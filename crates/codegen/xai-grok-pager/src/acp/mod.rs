@@ -107,6 +107,8 @@ pub struct ConnectFlags {
     pub backend: BackendKind,
     /// Optional path to the `codex` executable.
     pub codex_bin: Option<std::path::PathBuf>,
+    /// Preserve the optional OpenAI Docs MCP in pager-managed Codex sessions.
+    pub codex_openai_docs_mcp: bool,
     pub subagents: bool,
     pub experimental_memory: bool,
     pub no_memory: bool,
@@ -252,7 +254,7 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
 }
 
 async fn connect_codex(cancel: &CancellationToken, flags: &ConnectFlags) -> Result<AcpConnection> {
-    let spawned = spawn::spawn_codex(flags.codex_bin.clone(), cancel)?;
+    let spawned = spawn::spawn_codex(flags.codex_bin.clone(), flags.codex_openai_docs_mcp, cancel)?;
     let auth_manager = spawned.auth_manager.clone();
     let (tx, rx) = (spawned.channel.tx, spawned.channel.rx);
     let (

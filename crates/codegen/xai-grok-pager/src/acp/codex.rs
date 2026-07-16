@@ -163,12 +163,14 @@ pub struct CodexAgent {
     completions: Rc<RefCell<HashMap<String, oneshot::Sender<acp::StopReason>>>>,
     login_completions: Rc<RefCell<HashMap<String, oneshot::Sender<Result<()>>>>>,
     authenticated: Cell<bool>,
+    openai_docs_mcp: bool,
 }
 
 impl CodexAgent {
     pub async fn spawn(
         executable: PathBuf,
         client: AcpGatewaySender<acp::AgentSide>,
+        openai_docs_mcp: bool,
     ) -> Result<Self> {
         let (rpc, inbound) = CodexRpc::spawn(executable).await?;
         let rpc = Rc::new(rpc);
@@ -192,17 +194,18 @@ impl CodexAgent {
             completions,
             login_completions,
             authenticated: Cell::new(false),
+            openai_docs_mcp,
         })
     }
 
-    async fn refresh_models(&self) -> Result<Vec<acp::ModelInfo>> {
+    async fn refresh_models(&self) -> Result<Option<acp::SessionModelState>> {
         let response = self
             .rpc
             .request("model/list", json!({"limit": 100}))
             .await?;
         let models = map_models(&response);
         *self.models.borrow_mut() = models.clone();
-        Ok(models)
+        Ok(map_model_state(&response, models))
     }
 
     fn model_state(&self, current: String) -> acp::SessionModelState {
@@ -233,7 +236,7 @@ impl acp::Agent for CodexAgent {
         self.rpc
             .notify("initialized", json!({}))
             .map_err(acp_error)?;
-        self.refresh_models().await.map_err(acp_error)?;
+        let initial_model_state = self.refresh_models().await.map_err(acp_error)?;
         let account = self
             .rpc
             .request("account/read", json!({}))
@@ -254,12 +257,16 @@ impl acp::Agent for CodexAgent {
                 "Codex CLI session",
             ))]
         };
-        Ok(acp::InitializeResponse::new(args.protocol_version)
+        let mut response = acp::InitializeResponse::new(args.protocol_version)
             .agent_capabilities(acp::AgentCapabilities::new().load_session(true))
             .auth_methods(auth_methods)
             .agent_info(
                 acp::Implementation::new("codex", env!("CARGO_PKG_VERSION")).title("Codex"),
-            ))
+            );
+        if let Some(model_state) = initial_model_state {
+            response = response.meta(json!({"modelState": model_state}).as_object().cloned());
+        }
+        Ok(response)
     }
 
     async fn authenticate(
@@ -310,11 +317,7 @@ impl acp::Agent for CodexAgent {
             .rpc
             .request(
                 "thread/start",
-                json!({
-                    "cwd": args.cwd,
-                    "approvalPolicy": "on-request",
-                    "sandbox": "workspace-write"
-                }),
+                new_thread_params(args.cwd, self.openai_docs_mcp),
             )
             .await
             .map_err(acp_error)?;
@@ -345,15 +348,14 @@ impl acp::Agent for CodexAgent {
         args: acp::LoadSessionRequest,
     ) -> acp::Result<acp::LoadSessionResponse> {
         let session_id = args.session_id.0.to_string();
+        let mut params = json!({
+            "threadId": session_id,
+            "cwd": args.cwd
+        });
+        apply_thread_config(&mut params, self.openai_docs_mcp);
         let response = self
             .rpc
-            .request(
-                "thread/resume",
-                json!({
-                    "threadId": session_id,
-                    "cwd": args.cwd
-                }),
-            )
+            .request("thread/resume", params)
             .await
             .map_err(acp_error)?;
         let model = response
@@ -801,10 +803,7 @@ fn map_models(response: &Value) -> Vec<acp::ModelInfo> {
         .into_iter()
         .flatten()
         .filter_map(|model| {
-            let id = model
-                .get("id")
-                .or_else(|| model.get("model"))
-                .and_then(Value::as_str)?;
+            let id = model_id(model)?;
             let name = model
                 .get("displayName")
                 .or_else(|| model.get("name"))
@@ -813,6 +812,48 @@ fn map_models(response: &Value) -> Vec<acp::ModelInfo> {
             Some(acp::ModelInfo::new(id.to_owned(), name.to_owned()))
         })
         .collect()
+}
+
+fn map_model_state(
+    response: &Value,
+    models: Vec<acp::ModelInfo>,
+) -> Option<acp::SessionModelState> {
+    let default_model = response
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|model| model.get("isDefault").and_then(Value::as_bool) == Some(true))
+        .and_then(model_id)
+        .map(str::to_owned)
+        .or_else(|| models.first().map(|model| model.model_id.0.to_string()))?;
+    Some(acp::SessionModelState::new(default_model, models))
+}
+
+fn model_id(model: &Value) -> Option<&str> {
+    model
+        .get("id")
+        .or_else(|| model.get("model"))
+        .and_then(Value::as_str)
+}
+
+/// This optional global MCP can spend several seconds repeating OAuth metadata
+/// discovery during every embedded thread start. Keep it out by default while
+/// allowing users who need its tools to preserve it explicitly.
+fn apply_thread_config(params: &mut Value, openai_docs_mcp: bool) {
+    if !openai_docs_mcp {
+        params["config"] = json!({"mcp_servers.openaiDeveloperDocs.enabled": false});
+    }
+}
+
+fn new_thread_params(cwd: PathBuf, openai_docs_mcp: bool) -> Value {
+    let mut params = json!({
+        "cwd": cwd,
+        "approvalPolicy": "on-request",
+        "sandbox": "workspace-write"
+    });
+    apply_thread_config(&mut params, openai_docs_mcp);
+    params
 }
 
 fn acp_error(error: anyhow::Error) -> acp::Error {
@@ -824,14 +865,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn maps_codex_model_catalog_to_acp() {
-        let models = map_models(&json!({"data": [
-            {"id": "gpt-5.4", "displayName": "GPT-5.4"},
-            {"model": "gpt-5.3-codex", "name": "GPT-5.3 Codex"}
-        ]}));
-        assert_eq!(models.len(), 2);
-        assert_eq!(models[0].model_id.0.as_ref(), "gpt-5.4");
-        assert_eq!(models[1].name, "GPT-5.3 Codex");
+    fn maps_codex_default_model_catalog_to_initial_acp_state() {
+        let response = json!({"data": [
+            {"id": "gpt-5.4", "displayName": "GPT-5.4", "isDefault": false},
+            {"model": "gpt-5.3-codex", "name": "GPT-5.3 Codex", "isDefault": true}
+        ]});
+        let model_state = map_model_state(&response, map_models(&response)).unwrap();
+        assert_eq!(model_state.current_model_id.0.as_ref(), "gpt-5.3-codex");
+        assert_eq!(model_state.available_models.len(), 2);
+        assert_eq!(
+            model_state.available_models[0].model_id.0.as_ref(),
+            "gpt-5.4"
+        );
+        assert_eq!(model_state.available_models[1].name, "GPT-5.3 Codex");
+    }
+
+    #[test]
+    fn codex_thread_start_disables_redundant_docs_mcp_discovery() {
+        let params = new_thread_params(PathBuf::from("/workspace"), false);
+        assert_eq!(
+            params.pointer("/config/mcp_servers.openaiDeveloperDocs.enabled"),
+            Some(&Value::Bool(false))
+        );
+    }
+
+    #[test]
+    fn codex_thread_start_can_preserve_docs_mcp() {
+        let params = new_thread_params(PathBuf::from("/workspace"), true);
+        assert!(params.get("config").is_none());
     }
 
     #[test]
