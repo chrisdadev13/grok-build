@@ -1,0 +1,53 @@
+crates/codegen/xai-grok-pager/src/app/dispatch/tests/prompt.rs
+  s_586f7f6777dd21::t_fd07f1ebc3290f 21-28
+  s_586f7f6777dd21::t_094113c7790a50 31-54
+  s_586f7f6777dd21::t_21566a3e182f9e 5-20,29-30
+crates/codegen/xai-grok-pager/src/app/dispatch/tests/modes.rs
+  s_586f7f6777dd21::t_510dec43e01934 1702-1731
+crates/codegen/xai-grok-pager/src/app/acp_handler/session_notification.rs
+  s_586f7f6777dd21::t_a73a3aacde5a70 1349-1353,1355-1356
+  s_586f7f6777dd21::t_1de1a4e58e7ab6 1354
+crates/codegen/xai-grok-pager/src/app/dispatch/queue.rs
+  s_586f7f6777dd21::t_efabc2c20b76b6 170-207,415,418-420,422-423,437,440-442,444-445,452,455-457,459-460
+  s_586f7f6777dd21::t_a44e7999865d40 447-451
+  s_586f7f6777dd21::t_6f605988b610d1 268-274,392,402,425
+crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs
+  s_586f7f6777dd21::t_fd07f1ebc3290f 181-182,189
+  s_586f7f6777dd21::t_8d242bee27c58d 41,179,190,192-194
+  s_586f7f6777dd21::t_7eb75d411a0c9d 183-184
+  s_586f7f6777dd21::t_510dec43e01934 174-178,180,185-188,191,195-197
+crates/codegen/xai-grok-pager/src/app/effects/mod.rs
+  s_586f7f6777dd21::t_510dec43e01934 1375-1379,1381-1386
+  s_586f7f6777dd21::t_e63b6f1dbcdaea 1051,1100,1168,1420,4247-4252,4263,4268
+  s_586f7f6777dd21::t_6f605988b610d1 1395,1404,1417-1419,4259,4264-4267
+  s_586f7f6777dd21::t_a44e7999865d40 1422
+crates/codegen/xai-grok-pager/src/app/effects/tests.rs
+  s_586f7f6777dd21::t_e63b6f1dbcdaea 55,64,67-71,74-81
+  s_586f7f6777dd21::t_6f605988b610d1 72-73
+  s_586f7f6777dd21::t_d6824ceb7880b7 82
+crates/codegen/xai-grok-pager/src/app/actions.rs
+  s_586f7f6777dd21::t_6f605988b610d1 1623-1625
+  s_586f7f6777dd21::t_510dec43e01934 2043-2049
+crates/codegen/xai-grok-pager/src/app/acp_handler/tests/plan_mode.rs
+  s_586f7f6777dd21::t_a73a3aacde5a70 414-432
+  s_586f7f6777dd21::t_4436cf132a1ebf 374
+crates/codegen/xai-grok-pager/src/app/dispatch/modes.rs
+  s_586f7f6777dd21::t_6f605988b610d1 98
+  s_586f7f6777dd21::t_2d7128b69f8b9d 129-131
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "a984e72baf147f3acde69dc338d4d0e32ab7fdfe",
+  "prompts": {},
+  "sessions": {
+    "s_586f7f6777dd21": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6e42-07bf-7351-94a5-044b467835dc",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": null
+    }
+  }
+}
