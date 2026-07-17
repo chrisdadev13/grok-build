@@ -145,6 +145,15 @@ impl CodexRpc {
             .send(json!({"id": id, "result": result}))
             .map_err(|_| anyhow::anyhow!("Codex app-server stopped"))
     }
+
+    fn respond_error(&self, id: Value, code: i64, message: impl Into<String>) -> Result<()> {
+        self.outbound
+            .send(json!({
+                "id": id,
+                "error": {"code": code, "message": message.into()}
+            }))
+            .map_err(|_| anyhow::anyhow!("Codex app-server stopped"))
+    }
 }
 
 fn fail_pending(
@@ -173,6 +182,47 @@ pub struct CodexAgent {
 struct CodexModelSelection {
     model: String,
     effort: Option<ReasoningEffort>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexRequestUserInputParams {
+    thread_id: String,
+    turn_id: String,
+    item_id: String,
+    questions: Vec<CodexRequestUserInputQuestion>,
+    #[serde(default)]
+    auto_resolution_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexRequestUserInputQuestion {
+    id: String,
+    header: String,
+    question: String,
+    #[serde(default)]
+    options: Option<Vec<CodexRequestUserInputOption>>,
+    #[serde(default)]
+    is_other: bool,
+    #[serde(default)]
+    is_secret: bool,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct CodexRequestUserInputOption {
+    label: String,
+    description: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+struct CodexRequestUserInputResponse {
+    answers: HashMap<String, CodexRequestUserInputAnswer>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+struct CodexRequestUserInputAnswer {
+    answers: Vec<String>,
 }
 
 impl CodexAgent {
@@ -660,6 +710,227 @@ fn timestamp(seconds: i64) -> String {
         .to_rfc3339()
 }
 
+fn codex_question_ext_request(
+    request: &CodexRequestUserInputParams,
+) -> xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtRequest {
+    use xai_grok_tools::implementations::grok_build::ask_user_question::{
+        AskUserQuestionExtRequest, AskUserQuestionMode, Question, QuestionOption,
+    };
+
+    let questions = request
+        .questions
+        .iter()
+        .map(|question| Question {
+            question: codex_question_display_text(question),
+            options: question
+                .options
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|option| QuestionOption {
+                    label: option.label,
+                    description: option.description,
+                    preview: None,
+                    id: None,
+                })
+                .collect(),
+            multi_select: Some(false),
+            id: Some(question.id.clone()),
+        })
+        .collect();
+
+    AskUserQuestionExtRequest {
+        session_id: request.thread_id.clone(),
+        tool_call_id: request.item_id.clone(),
+        questions,
+        mode: AskUserQuestionMode::Default,
+    }
+}
+
+fn codex_question_display_text(question: &CodexRequestUserInputQuestion) -> String {
+    if question.header.trim().is_empty() {
+        question.question.clone()
+    } else {
+        format!("{}\n\n{}", question.header, question.question)
+    }
+}
+
+fn codex_user_input_result(
+    request: &CodexRequestUserInputParams,
+    response: xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtResponse,
+) -> CodexRequestUserInputResponse {
+    use xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtResponse;
+
+    let AskUserQuestionExtResponse::Accepted {
+        answers,
+        annotations,
+    } = response
+    else {
+        return CodexRequestUserInputResponse {
+            answers: HashMap::new(),
+        };
+    };
+
+    let mut codex_answers = HashMap::new();
+    for question in &request.questions {
+        let display_text = codex_question_display_text(question);
+        let answer_key = [&question.id, &question.question, &display_text]
+            .into_iter()
+            .find(|key| answers.contains_key(key.as_str()));
+        let Some(answer_key) = answer_key else {
+            continue;
+        };
+        let selected = &answers[answer_key.as_str()];
+        let note = annotations
+            .as_ref()
+            .and_then(|all| all.get(answer_key.as_str()))
+            .and_then(|annotation| annotation.notes.as_deref())
+            .filter(|note| !note.trim().is_empty());
+
+        let mut values = selected.clone();
+        if let Some(note) = note {
+            if let Some(other) = values.iter_mut().find(|value| value.as_str() == "Other") {
+                *other = note.to_owned();
+            } else {
+                values.push(note.to_owned());
+            }
+        }
+        codex_answers.insert(
+            question.id.clone(),
+            CodexRequestUserInputAnswer { answers: values },
+        );
+    }
+    CodexRequestUserInputResponse {
+        answers: codex_answers,
+    }
+}
+
+fn notify_codex_question_pending(
+    client: &AcpGatewaySender<acp::AgentSide>,
+    request: &CodexRequestUserInputParams,
+) {
+    let params = serde_json::value::to_raw_value(&json!({
+        "sessionId": request.thread_id,
+        "update": {
+            "sessionUpdate": "pending_interaction",
+            "tool_call_id": request.item_id,
+            "kind": "question",
+        }
+    }))
+    .expect("static pending-interaction payload must serialize");
+    client.forward_fire_and_forget(acp::ExtNotification::new(
+        "x.ai/session_notification",
+        params.into(),
+    ));
+}
+
+fn notify_codex_question_resolved(
+    client: &AcpGatewaySender<acp::AgentSide>,
+    request: &CodexRequestUserInputParams,
+) {
+    let params = serde_json::value::to_raw_value(&json!({
+        "sessionId": request.thread_id,
+        "update": {
+            "sessionUpdate": "interaction_resolved",
+            "tool_call_id": request.item_id,
+        }
+    }))
+    .expect("static interaction-resolved payload must serialize");
+    client.forward_fire_and_forget(acp::ExtNotification::new(
+        "x.ai/session_notification",
+        params.into(),
+    ));
+}
+
+/// Brackets a Codex question with the same lifecycle notifications emitted by
+/// Grok's pending-interaction registry. Dropping the future on cancellation
+/// also resolves the interaction, so external subscribers cannot remain stuck.
+struct CodexPendingQuestion<'a> {
+    client: &'a AcpGatewaySender<acp::AgentSide>,
+    request: &'a CodexRequestUserInputParams,
+}
+
+impl<'a> CodexPendingQuestion<'a> {
+    fn new(
+        client: &'a AcpGatewaySender<acp::AgentSide>,
+        request: &'a CodexRequestUserInputParams,
+    ) -> Self {
+        notify_codex_question_pending(client, request);
+        Self { client, request }
+    }
+}
+
+impl Drop for CodexPendingQuestion<'_> {
+    fn drop(&mut self) {
+        notify_codex_question_resolved(self.client, self.request);
+    }
+}
+
+async fn request_codex_user_input(
+    client: &AcpGatewaySender<acp::AgentSide>,
+    request: &CodexRequestUserInputParams,
+) -> Result<CodexRequestUserInputResponse> {
+    use acp::Client as _;
+    use xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtResponse;
+
+    validate_codex_user_input(request)?;
+
+    let ext_request = acp::ExtRequest::new(
+        "x.ai/ask_user_question",
+        serde_json::value::to_raw_value(&codex_question_ext_request(request))
+            .expect("Codex question conversion must serialize")
+            .into(),
+    );
+    let _pending_question = CodexPendingQuestion::new(client, request);
+    let response = if let Some(timeout_ms) = request.auto_resolution_ms {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(timeout_ms),
+            client.ext_method(ext_request),
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(_) => {
+                return Ok(CodexRequestUserInputResponse {
+                    answers: HashMap::new(),
+                });
+            }
+        }
+    } else {
+        client.ext_method(ext_request).await
+    }?;
+    let response: AskUserQuestionExtResponse = serde_json::from_str(response.0.get())
+        .context("pager returned an invalid ask_user_question response")?;
+    Ok(codex_user_input_result(request, response))
+}
+
+fn validate_codex_user_input(request: &CodexRequestUserInputParams) -> Result<()> {
+    if request.thread_id.trim().is_empty()
+        || request.turn_id.trim().is_empty()
+        || request.item_id.trim().is_empty()
+    {
+        anyhow::bail!("Codex request_user_input contained an empty routing id");
+    }
+    if request.questions.is_empty() {
+        anyhow::bail!("Codex request_user_input contained no questions");
+    }
+    if request.questions.iter().any(|question| question.is_secret) {
+        anyhow::bail!("secret request_user_input questions are not supported by Codex TUI");
+    }
+    if request.questions.iter().any(|question| !question.is_other) {
+        anyhow::bail!("request_user_input without the free-form Other option is not supported");
+    }
+    if request.questions.iter().any(|question| {
+        question
+            .options
+            .as_ref()
+            .is_none_or(|options| options.is_empty())
+    }) {
+        anyhow::bail!("Codex request_user_input requires options for every question");
+    }
+    Ok(())
+}
+
 async fn forward_events(
     mut inbound: mpsc::UnboundedReceiver<Value>,
     rpc: Rc<CodexRpc>,
@@ -797,6 +1068,41 @@ async fn forward_events(
                         Err(_) => "decline".to_owned(),
                     };
                     let _ = rpc.respond(id, json!({"decision": decision}));
+                }
+            }
+            "item/tool/requestUserInput" => {
+                let Some(id) = message.get("id").cloned() else {
+                    tracing::warn!(?params, "Codex request_user_input had no request id");
+                    continue;
+                };
+                match serde_json::from_value::<CodexRequestUserInputParams>(params.clone()) {
+                    Ok(request) => {
+                        if let Err(error) = validate_codex_user_input(&request) {
+                            let _ = rpc.respond_error(id, -32602, error.to_string());
+                            continue;
+                        }
+                        let client = client.clone();
+                        let rpc = rpc.clone();
+                        tokio::task::spawn_local(async move {
+                            match request_codex_user_input(&client, &request).await {
+                                Ok(result) => {
+                                    let result = serde_json::to_value(result)
+                                        .expect("Codex request_user_input response must serialize");
+                                    let _ = rpc.respond(id, result);
+                                }
+                                Err(error) => {
+                                    let _ = rpc.respond_error(id, -32603, error.to_string());
+                                }
+                            }
+                        });
+                    }
+                    Err(error) => {
+                        let _ = rpc.respond_error(
+                            id,
+                            -32602,
+                            format!("invalid Codex request_user_input params: {error}"),
+                        );
+                    }
                 }
             }
             "turn/completed" => {
@@ -1063,6 +1369,19 @@ fn acp_error(error: anyhow::Error) -> acp::Error {
 mod tests {
     use super::*;
 
+    fn test_rpc() -> (Rc<CodexRpc>, mpsc::UnboundedReceiver<Value>) {
+        let (outbound, outbound_rx) = mpsc::unbounded_channel();
+        (
+            Rc::new(CodexRpc {
+                outbound,
+                pending: Rc::new(RefCell::new(HashMap::new())),
+                next_id: Cell::new(1),
+                closed: Rc::new(Cell::new(false)),
+            }),
+            outbound_rx,
+        )
+    }
+
     #[tokio::test]
     async fn setting_acp_plan_mode_updates_codex_collaboration_mode() {
         let (outbound, mut outbound_rx) = mpsc::unbounded_channel();
@@ -1151,6 +1470,512 @@ mod tests {
         assert_eq!(args.request.method.as_ref(), "x.ai/mcp_initialized");
         let params: Value = serde_json::from_str(args.request.params.get()).unwrap();
         assert_eq!(params, json!({"sessionId": "thread-1"}));
+    }
+
+    #[tokio::test]
+    async fn codex_request_user_input_round_trips_through_the_pager() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
+                let (rpc, mut outbound_rx) = test_rpc();
+                let (mut client_channel, agent_channel) = xai_acp_lib::acp_channels();
+                let client = AcpGatewaySender::new(agent_channel.tx);
+                let active_turns = Rc::new(RefCell::new(HashMap::new()));
+                let completions = Rc::new(RefCell::new(HashMap::new()));
+                let login_completions = Rc::new(RefCell::new(HashMap::new()));
+
+                inbound_tx
+                    .send(json!({
+                        "id": 41,
+                        "method": "item/tool/requestUserInput",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turnId": "turn-1",
+                            "itemId": "item-1",
+                            "questions": [{
+                                "id": "speed",
+                                "header": "Strategy",
+                                "question": "Which approach?",
+                                "isOther": true,
+                                "options": [
+                                    {"label": "Fast", "description": "Ship the smallest fix"},
+                                    {"label": "Thorough", "description": "Cover every edge case"}
+                                ]
+                            }]
+                        }
+                    }))
+                    .unwrap();
+                drop(inbound_tx);
+
+                let drive_client = async {
+                    let pending = client_channel
+                        .rx
+                        .recv()
+                        .await
+                        .expect("pager should receive a pending-interaction notification");
+                    let xai_acp_lib::AcpClientMessage::ExtNotification(pending) = pending else {
+                        panic!("question must be marked pending before opening the modal");
+                    };
+                    assert_eq!(pending.request.method.as_ref(), "x.ai/session_notification");
+                    let pending: Value =
+                        serde_json::from_str(pending.request.params.get()).unwrap();
+                    assert_eq!(
+                        pending,
+                        json!({
+                            "sessionId": "thread-1",
+                            "update": {
+                                "sessionUpdate": "pending_interaction",
+                                "tool_call_id": "item-1",
+                                "kind": "question"
+                            }
+                        })
+                    );
+
+                    let message = client_channel
+                        .rx
+                        .recv()
+                        .await
+                        .expect("pager should receive a question request");
+                    let xai_acp_lib::AcpClientMessage::ExtMethod(args) = message else {
+                        panic!("expected ask_user_question ext method");
+                    };
+                    assert_eq!(args.request.method.as_ref(), "x.ai/ask_user_question");
+                    let request: Value = serde_json::from_str(args.request.params.get()).unwrap();
+                    assert_eq!(request["sessionId"], "thread-1");
+                    assert_eq!(request["toolCallId"], "item-1");
+                    assert_eq!(
+                        request["questions"][0]["question"],
+                        "Strategy\n\nWhich approach?"
+                    );
+                    assert_eq!(request["questions"][0]["id"], "speed");
+
+                    let response = serde_json::value::RawValue::from_string(
+                        json!({
+                            "outcome": "accepted",
+                            "answers": {"speed": ["Fast"]}
+                        })
+                        .to_string(),
+                    )
+                    .unwrap();
+                    args.response_tx
+                        .send(Ok(acp::ExtResponse::new(response.into())))
+                        .unwrap();
+
+                    let resolved = client_channel
+                        .rx
+                        .recv()
+                        .await
+                        .expect("pager should receive an interaction-resolved notification");
+                    let xai_acp_lib::AcpClientMessage::ExtNotification(resolved) = resolved else {
+                        panic!("question must be resolved after the answer");
+                    };
+                    assert_eq!(
+                        resolved.request.method.as_ref(),
+                        "x.ai/session_notification"
+                    );
+                    let resolved: Value =
+                        serde_json::from_str(resolved.request.params.get()).unwrap();
+                    assert_eq!(
+                        resolved,
+                        json!({
+                            "sessionId": "thread-1",
+                            "update": {
+                                "sessionUpdate": "interaction_resolved",
+                                "tool_call_id": "item-1"
+                            }
+                        })
+                    );
+
+                    let response = outbound_rx
+                        .recv()
+                        .await
+                        .expect("Codex app-server should receive the answer");
+                    assert_eq!(response["id"], 41);
+                    assert_eq!(
+                        response["result"],
+                        json!({"answers": {"speed": {"answers": ["Fast"]}}})
+                    );
+                };
+
+                let forward = forward_events(
+                    inbound_rx,
+                    rpc,
+                    client,
+                    active_turns,
+                    completions,
+                    login_completions,
+                );
+                tokio::time::timeout(std::time::Duration::from_millis(250), async {
+                    tokio::join!(forward, drive_client)
+                })
+                .await
+                .expect("request_user_input must not remain unanswered");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn codex_questions_for_two_sessions_are_dispatched_concurrently() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
+                let (rpc, mut outbound_rx) = test_rpc();
+                let (mut client_channel, agent_channel) = xai_acp_lib::acp_channels();
+                let client = AcpGatewaySender::new(agent_channel.tx);
+                for (id, thread_id, item_id) in [
+                    (51, "thread-foreground", "item-foreground"),
+                    (52, "thread-background", "item-background"),
+                ] {
+                    inbound_tx
+                        .send(json!({
+                            "id": id,
+                            "method": "item/tool/requestUserInput",
+                            "params": {
+                                "threadId": thread_id,
+                                "turnId": format!("turn-{id}"),
+                                "itemId": item_id,
+                                "questions": [{
+                                    "id": "choice",
+                                    "header": "Choice",
+                                    "question": "Pick one",
+                                    "isOther": true,
+                                    "options": [{
+                                        "label": "One",
+                                        "description": "Choose one"
+                                    }]
+                                }]
+                            }
+                        }))
+                        .unwrap();
+                }
+                drop(inbound_tx);
+
+                let drive_client = async {
+                    let mut methods = Vec::new();
+                    let mut pending_sessions = Vec::new();
+                    for _ in 0..4 {
+                        match client_channel.rx.recv().await.unwrap() {
+                            xai_acp_lib::AcpClientMessage::ExtMethod(method) => {
+                                methods.push(method);
+                            }
+                            xai_acp_lib::AcpClientMessage::ExtNotification(notification) => {
+                                let notification: Value =
+                                    serde_json::from_str(notification.request.params.get())
+                                        .unwrap();
+                                assert_eq!(
+                                    notification["update"]["sessionUpdate"],
+                                    "pending_interaction"
+                                );
+                                pending_sessions
+                                    .push(notification["sessionId"].as_str().unwrap().to_owned());
+                            }
+                            _ => panic!("unexpected ACP message while opening Codex questions"),
+                        }
+                    }
+                    pending_sessions.sort();
+                    assert_eq!(
+                        pending_sessions,
+                        vec!["thread-background", "thread-foreground"]
+                    );
+                    assert_eq!(methods.len(), 2);
+
+                    for method in methods {
+                        let response = serde_json::value::RawValue::from_string(
+                            json!({"outcome": "cancelled"}).to_string(),
+                        )
+                        .unwrap();
+                        method
+                            .response_tx
+                            .send(Ok(acp::ExtResponse::new(response.into())))
+                            .unwrap();
+                    }
+
+                    let mut resolved_sessions = Vec::new();
+                    for _ in 0..2 {
+                        let xai_acp_lib::AcpClientMessage::ExtNotification(notification) =
+                            client_channel.rx.recv().await.unwrap()
+                        else {
+                            panic!("cancelled questions must resolve their pending interactions");
+                        };
+                        let notification: Value =
+                            serde_json::from_str(notification.request.params.get()).unwrap();
+                        assert_eq!(
+                            notification["update"]["sessionUpdate"],
+                            "interaction_resolved"
+                        );
+                        resolved_sessions
+                            .push(notification["sessionId"].as_str().unwrap().to_owned());
+                    }
+                    resolved_sessions.sort();
+                    assert_eq!(
+                        resolved_sessions,
+                        vec!["thread-background", "thread-foreground"]
+                    );
+
+                    let mut response_ids = vec![
+                        outbound_rx.recv().await.unwrap()["id"].as_u64().unwrap(),
+                        outbound_rx.recv().await.unwrap()["id"].as_u64().unwrap(),
+                    ];
+                    response_ids.sort_unstable();
+                    assert_eq!(response_ids, vec![51, 52]);
+                };
+
+                let forward = forward_events(
+                    inbound_rx,
+                    rpc,
+                    client,
+                    Rc::new(RefCell::new(HashMap::new())),
+                    Rc::new(RefCell::new(HashMap::new())),
+                    Rc::new(RefCell::new(HashMap::new())),
+                );
+                tokio::time::timeout(std::time::Duration::from_millis(500), async {
+                    tokio::join!(forward, drive_client)
+                })
+                .await
+                .expect("a foreground question must not block a background session");
+            })
+            .await;
+    }
+
+    #[test]
+    fn codex_request_user_input_maps_other_text_to_the_question_id() {
+        let request: CodexRequestUserInputParams = serde_json::from_value(json!({
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "item-1",
+            "questions": [{
+                "id": "approach",
+                "header": "Approach",
+                "question": "How should we proceed?",
+                "isOther": true,
+                "options": [{"label": "Small", "description": "Small change"}]
+            }]
+        }))
+        .unwrap();
+        let response = serde_json::from_value(json!({
+            "outcome": "accepted",
+            "answers": {"approach": ["Other"]},
+            "annotations": {"approach": {"notes": "Use a feature flag"}}
+        }))
+        .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(codex_user_input_result(&request, response)).unwrap(),
+            json!({
+                "answers": {
+                    "approach": {"answers": ["Use a feature flag"]}
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn cancelling_codex_request_user_input_returns_empty_answers() {
+        let request: CodexRequestUserInputParams = serde_json::from_value(json!({
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "item-1",
+            "questions": [{
+                "id": "approach",
+                "header": "Approach",
+                "question": "How should we proceed?",
+                "isOther": true,
+                "options": [{"label": "Small", "description": "Small change"}]
+            }]
+        }))
+        .unwrap();
+        let response = serde_json::from_value(json!({"outcome": "cancelled"})).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(codex_user_input_result(&request, response)).unwrap(),
+            json!({"answers": {}})
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_request_user_input_auto_resolves_and_retracts_the_modal() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
+                let (rpc, mut outbound_rx) = test_rpc();
+                let (mut client_channel, agent_channel) = xai_acp_lib::acp_channels();
+                inbound_tx
+                    .send(json!({
+                        "id": 44,
+                        "method": "item/tool/requestUserInput",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turnId": "turn-1",
+                            "itemId": "item-1",
+                            "autoResolutionMs": 1,
+                            "questions": [{
+                                "id": "approach",
+                                "header": "Approach",
+                                "question": "How should we proceed?",
+                                "isOther": true,
+                                "options": [{
+                                    "label": "Small",
+                                    "description": "Small change"
+                                }]
+                            }]
+                        }
+                    }))
+                    .unwrap();
+                drop(inbound_tx);
+
+                let drive_client = async {
+                    let xai_acp_lib::AcpClientMessage::ExtNotification(pending) =
+                        client_channel.rx.recv().await.unwrap()
+                    else {
+                        panic!("auto-resolving question must first be marked pending");
+                    };
+                    let pending: Value =
+                        serde_json::from_str(pending.request.params.get()).unwrap();
+                    assert_eq!(pending["update"]["sessionUpdate"], "pending_interaction");
+                    assert!(matches!(
+                        client_channel.rx.recv().await.unwrap(),
+                        xai_acp_lib::AcpClientMessage::ExtMethod(_)
+                    ));
+                    let xai_acp_lib::AcpClientMessage::ExtNotification(notification) =
+                        client_channel.rx.recv().await.unwrap()
+                    else {
+                        panic!("auto-resolution should retract the pager modal");
+                    };
+                    assert_eq!(
+                        notification.request.method.as_ref(),
+                        "x.ai/session_notification"
+                    );
+                    let notification: Value =
+                        serde_json::from_str(notification.request.params.get()).unwrap();
+                    assert_eq!(notification["sessionId"], "thread-1");
+                    assert_eq!(
+                        notification["update"],
+                        json!({
+                            "sessionUpdate": "interaction_resolved",
+                            "tool_call_id": "item-1"
+                        })
+                    );
+
+                    let response = outbound_rx.recv().await.unwrap();
+                    assert_eq!(response["id"], 44);
+                    assert_eq!(response["result"], json!({"answers": {}}));
+                    assert!(outbound_rx.try_recv().is_err());
+                };
+                let forward = forward_events(
+                    inbound_rx,
+                    rpc,
+                    AcpGatewaySender::new(agent_channel.tx),
+                    Rc::new(RefCell::new(HashMap::new())),
+                    Rc::new(RefCell::new(HashMap::new())),
+                    Rc::new(RefCell::new(HashMap::new())),
+                );
+                tokio::time::timeout(std::time::Duration::from_millis(250), async {
+                    tokio::join!(forward, drive_client)
+                })
+                .await
+                .expect("auto-resolution must answer the original app-server request");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn malformed_codex_request_user_input_receives_an_error_response() {
+        let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
+        let (rpc, mut outbound_rx) = test_rpc();
+        let (_client_channel, agent_channel) = xai_acp_lib::acp_channels();
+        inbound_tx
+            .send(json!({
+                "id": 42,
+                "method": "item/tool/requestUserInput",
+                "params": {
+                    "threadId": "thread-1",
+                    "itemId": "item-1",
+                    "questions": [{"question": "Missing an id"}]
+                }
+            }))
+            .unwrap();
+        drop(inbound_tx);
+
+        forward_events(
+            inbound_rx,
+            rpc,
+            AcpGatewaySender::new(agent_channel.tx),
+            Rc::new(RefCell::new(HashMap::new())),
+            Rc::new(RefCell::new(HashMap::new())),
+            Rc::new(RefCell::new(HashMap::new())),
+        )
+        .await;
+
+        let response = outbound_rx.recv().await.unwrap();
+        assert_eq!(response["id"], 42);
+        assert_eq!(response["error"]["code"], -32602);
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("invalid Codex request_user_input params")
+        );
+    }
+
+    #[tokio::test]
+    async fn secret_codex_request_user_input_fails_closed() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
+                let (rpc, mut outbound_rx) = test_rpc();
+                let (mut client_channel, agent_channel) = xai_acp_lib::acp_channels();
+                inbound_tx
+                    .send(json!({
+                        "id": 43,
+                        "method": "item/tool/requestUserInput",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turnId": "turn-1",
+                            "itemId": "item-1",
+                            "questions": [{
+                                "id": "token",
+                                "header": "Token",
+                                "question": "Enter a token",
+                                "isOther": true,
+                                "options": [{
+                                    "label": "Enter",
+                                    "description": "Provide the token"
+                                }],
+                                "isSecret": true
+                            }]
+                        }
+                    }))
+                    .unwrap();
+                drop(inbound_tx);
+
+                let drive_client = async {
+                    let response = outbound_rx.recv().await.unwrap();
+                    assert_eq!(response["id"], 43);
+                    assert_eq!(response["error"]["code"], -32602);
+                    assert!(
+                        response["error"]["message"]
+                            .as_str()
+                            .unwrap()
+                            .contains("secret")
+                    );
+                    assert!(outbound_rx.try_recv().is_err());
+                    assert!(client_channel.rx.try_recv().is_err());
+                };
+                let forward = forward_events(
+                    inbound_rx,
+                    rpc,
+                    AcpGatewaySender::new(agent_channel.tx),
+                    Rc::new(RefCell::new(HashMap::new())),
+                    Rc::new(RefCell::new(HashMap::new())),
+                    Rc::new(RefCell::new(HashMap::new())),
+                );
+                tokio::time::timeout(std::time::Duration::from_millis(250), async {
+                    tokio::join!(forward, drive_client)
+                })
+                .await
+                .expect("secret questions must receive one correlated error response");
+            })
+            .await;
     }
 
     #[test]

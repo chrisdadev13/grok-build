@@ -868,7 +868,11 @@ impl QuestionViewState {
                 labels
             };
 
-            answers.insert(q.question.clone(), label_vec);
+            // External adapters (for example Codex app-server) need stable
+            // question ids in the response. Native Grok questions leave `id`
+            // unset and retain the historical question-text key.
+            let answer_key = q.id.clone().unwrap_or_else(|| q.question.clone());
+            answers.insert(answer_key.clone(), label_vec);
 
             // Build annotation if there's preview or notes.
             let is_single = !q.multi_select.unwrap_or(false);
@@ -891,7 +895,7 @@ impl QuestionViewState {
             };
 
             if preview.is_some() || notes.is_some() {
-                annotations.insert(q.question.clone(), QuestionAnnotation { preview, notes });
+                annotations.insert(answer_key, QuestionAnnotation { preview, notes });
             }
         }
 
@@ -2114,6 +2118,24 @@ mod tests {
             multi_select: Some(multi),
             id: None,
         }
+    }
+
+    #[test]
+    fn accepted_response_prefers_a_stable_question_id() {
+        use xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtResponse;
+
+        let mut question = make_question("Which approach?", &["Fast"], false);
+        question.id = Some("approach".into());
+        let mut state =
+            QuestionViewState::new("item-1".into(), vec![question], StashedPrompt::default());
+        state.select_option(0, 0);
+
+        let AskUserQuestionExtResponse::Accepted { answers, .. } = state.build_accepted_response()
+        else {
+            panic!("question submission should be accepted");
+        };
+        assert_eq!(answers.get("approach"), Some(&vec!["Fast".to_string()]));
+        assert!(!answers.contains_key("Which approach?"));
     }
 
     /// Regression: on the terminal-native palette (`bg_visual = Reset`) the
