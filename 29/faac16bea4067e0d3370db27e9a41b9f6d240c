@@ -1,0 +1,32 @@
+crates/codegen/xai-grok-pager/src/app/dispatch/prompt.rs
+  s_e1c177bb307521::t_2d9946012ae726 1269
+crates/codegen/xai-grok-pager/src/notifications/title.rs
+  s_e1c177bb307521::t_f0147fa72e3ac7 34-35
+  s_e1c177bb307521::t_821f98758eb3ee 630,785
+  s_e1c177bb307521::t_2d9946012ae726 36,196,301,584,602,634,792
+crates/codegen/xai-grok-pager/src/notifications/mod.rs
+  s_e1c177bb307521::t_2d9946012ae726 563
+crates/codegen/xai-grok-pager/src/app/app_view.rs
+  s_e1c177bb307521::t_72fd6dd5822cca 9665-9683,9721-9722
+  s_e1c177bb307521::t_c3923dd21b7b5b 9684-9695,9720
+  s_e1c177bb307521::t_5917a234ff06a3 4917-4928,4930,4932-4937
+  s_e1c177bb307521::t_495c61f2cc2165 4952
+  s_e1c177bb307521::t_d99fd2d4f87227 9723-9752
+  s_e1c177bb307521::t_88f0e1e4cd322b 4938-4942,9696-9719
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "29faac16bea4067e0d3370db27e9a41b9f6d240c",
+  "prompts": {},
+  "sessions": {
+    "s_e1c177bb307521": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f7070-7b9d-7c92-81c0-f3e41d8b6bda",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "chrisdadev13 <chrisdadev13@gmail.com>"
+    }
+  }
+}
