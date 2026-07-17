@@ -1048,7 +1048,7 @@ pub(crate) fn execute(
                     ];
                     let req = acp::PromptRequest::new(session_id.clone(), prompt)
                         .meta(
-                            prompt_request_meta(&prompt_id, screen_mode)
+                            prompt_request_meta(&prompt_id, screen_mode, None)
                                 .as_object()
                                 .cloned(),
                         );
@@ -1097,7 +1097,7 @@ pub(crate) fn execute(
                         ),
                     );
                     let send_start = std::time::Instant::now();
-                    let mut meta = prompt_request_meta(&prompt_id, screen_mode);
+                    let mut meta = prompt_request_meta(&prompt_id, screen_mode, None);
                     if send_now && let Some(map) = meta.as_object_mut() {
                         map.insert("sendNow".into(), serde_json::Value::Bool(true));
                     }
@@ -1165,7 +1165,7 @@ pub(crate) fn execute(
                     ];
                     let req = acp::PromptRequest::new(session_id.clone(), prompt)
                         .meta(
-                            prompt_request_meta(&prompt_id, screen_mode)
+                            prompt_request_meta(&prompt_id, screen_mode, None)
                                 .as_object()
                                 .cloned(),
                         );
@@ -1372,11 +1372,19 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    let req = acp::SetSessionModeRequest::new(session_id, mode_id);
-                    if let Err(e) = acp_send(req, &tx).await {
+                    let req = acp::SetSessionModeRequest::new(
+                        session_id.clone(),
+                        mode_id.clone(),
+                    );
+                    let result = acp_send(req, &tx).await.map(|_| ()).map_err(|e| {
                         tracing::warn!("Failed to set session mode: {e}");
+                        e.to_string()
+                    });
+                    TaskResult::SetSessionModeComplete {
+                        session_id,
+                        mode_id,
+                        result,
                     }
-                    TaskResult::CancelComplete
                 });
         }
         Effect::SetModeThenPrompt {
@@ -1384,6 +1392,7 @@ pub(crate) fn execute(
             mode_id,
             agent_id,
             text,
+            blocks,
             prompt_id,
             skill_token_ranges,
         } => {
@@ -1392,6 +1401,7 @@ pub(crate) fn execute(
             let is_api_key_auth = session_flags.is_api_key_auth;
             tasks
                 .spawn(async move {
+                    let prompt_mode = mode_id.clone();
                     let mode_req = acp::SetSessionModeRequest::new(
                         session_id.clone(),
                         mode_id,
@@ -1404,15 +1414,12 @@ pub(crate) fn execute(
                         Some(&session_id.0),
                         Some(serde_json::json!({ "len" : text.len() })),
                     );
-                    let prompt = vec![
-                        plain_prompt_content_block(text, & skill_token_ranges)
-                    ];
+                    let prompt = blocks.unwrap_or_else(|| {
+                        vec![plain_prompt_content_block(text, &skill_token_ranges)]
+                    });
+                    let meta = prompt_request_meta(&prompt_id, screen_mode, Some(&prompt_mode));
                     let req = acp::PromptRequest::new(session_id.clone(), prompt)
-                        .meta(
-                            prompt_request_meta(&prompt_id, screen_mode)
-                                .as_object()
-                                .cloned(),
-                        );
+                        .meta(meta.as_object().cloned());
                     let result = acp_send(req, &tx).await;
                     log_prompt_result(&session_id, &result);
                     let http_status = result
@@ -4237,18 +4244,28 @@ fn plain_prompt_content_block(
     acp::ContentBlock::Text(acp::TextContent::new(text).meta(meta))
 }
 /// Build the `PromptRequest._meta` payload: `promptId` for notification /
-/// response correlation, plus `screenMode` (`fullscreen` | `inline` |
-/// `minimal`; headless stamps `"headless"` in its own path) so the shell can
-/// attribute `prompt_submitted` telemetry to minimal vs. regular usage.
+/// response correlation, optional turn `mode`, plus `screenMode` (`fullscreen`
+/// | `inline` | `minimal`; headless stamps `"headless"` in its own path) so
+/// the shell can attribute `prompt_submitted` telemetry to minimal vs. regular
+/// usage. A mode is included when a pending mode switch and prompt are sent as
+/// one ordered effect, making the prompt self-describing if the separate
+/// `session/set_mode` request fails or its notification is delayed.
 /// `screen_mode` is `None` only under `SessionFlags::default()` (tests); the
 /// key is omitted then, keeping the legacy wire shape byte-identical.
 /// Extracted from the spawns for testability.
 fn prompt_request_meta(
     prompt_id: &str,
     screen_mode: Option<&'static str>,
+    prompt_mode: Option<&acp::SessionModeId>,
 ) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     map.insert("promptId".into(), serde_json::Value::String(prompt_id.into()));
+    if let Some(mode) = prompt_mode {
+        map.insert(
+            "mode".into(),
+            serde_json::Value::String(mode.0.to_string()),
+        );
+    }
     if let Some(mode) = screen_mode {
         map.insert("screenMode".into(), serde_json::Value::String(mode.into()));
     }

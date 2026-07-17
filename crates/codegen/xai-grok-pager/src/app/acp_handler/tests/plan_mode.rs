@@ -371,7 +371,7 @@
     fn current_mode_update_default_deactivates_plan_mode() {
         let mut agent = make_agent(Some("s1"));
         agent.plan_mode_active = true;
-        agent.plan_mode_pending = Some(true);
+        agent.plan_mode_pending = Some(false);
 
         let refresh_needed =
             detect_plan_mode_change(&make_current_mode_update("default"), &mut agent);
@@ -411,3 +411,22 @@
         assert!(agent.plan_mode_pending.is_none());
     }
 
+    /// An update for an older mode request must not erase a newer, opposite
+    /// optimistic intent. The later matching update confirms and clears it.
+    #[test]
+    fn stale_current_mode_update_preserves_newer_pending_intent() {
+        let mut agent = make_agent(Some("s1"));
+        agent.plan_mode_pending = Some(false);
+
+        let refresh_needed =
+            detect_plan_mode_change(&make_current_mode_update("plan"), &mut agent);
+        assert!(refresh_needed);
+        assert!(agent.plan_mode_active);
+        assert_eq!(agent.plan_mode_pending, Some(false));
+
+        let refresh_needed =
+            detect_plan_mode_change(&make_current_mode_update("default"), &mut agent);
+        assert!(refresh_needed);
+        assert!(!agent.plan_mode_active);
+        assert!(agent.plan_mode_pending.is_none());
+    }

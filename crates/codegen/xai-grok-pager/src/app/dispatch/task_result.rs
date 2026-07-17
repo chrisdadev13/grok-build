@@ -38,7 +38,7 @@ use super::session::load::{
     handle_session_loaded, handle_session_restore_failed, handle_session_restored,
     handle_session_search_debounce_expired, remove_session_from_pickers,
 };
-use super::settings::ui::apply_setting_rollback;
+use super::settings::ui::{apply_setting_rollback, refresh_open_settings_modals};
 use super::status::{
     handle_coding_data_sharing_failed, handle_coding_data_sharing_updated,
     handle_context_info_complete, scrub_error_for_toast,
@@ -171,6 +171,30 @@ fn drain_clipboard_target(target: &ClipboardPasteTarget, app: &mut AppView) -> V
 /// Handle a completed async task result.
 pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec<Effect> {
     match result {
+        TaskResult::SetSessionModeComplete {
+            session_id,
+            mode_id,
+            result,
+        } => {
+            let mut rolled_back = false;
+            if let Err(error) = result {
+                let requested_plan =
+                    xai_grok_tools::types::SessionMode::from_id(mode_id.0.as_ref()).is_plan();
+                if let Some(agent) =
+                    find_agent_by_session_id(&mut app.agents, session_id.0.as_ref())
+                    && agent.plan_mode_pending == Some(requested_plan)
+                {
+                    agent.plan_mode_pending = None;
+                    let label = if requested_plan { "Plan" } else { "Default" };
+                    agent.show_toast(&format!("Couldn't switch to {label} mode: {error}"));
+                    rolled_back = true;
+                }
+            }
+            if rolled_back {
+                refresh_open_settings_modals(app);
+            }
+            vec![]
+        }
         TaskResult::SessionCreated {
             agent_id,
             session_id,

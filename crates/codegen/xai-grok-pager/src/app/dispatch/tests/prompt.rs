@@ -2,6 +2,56 @@
 
 use super::*;
 
+/// A prompt submitted while the Plan transition is still awaiting the shell
+/// must carry the mode switch and prompt in one ordered effect. Otherwise the
+/// prompt can start in Default mode while the pager already displays Plan.
+#[test]
+fn prompt_submitted_while_plan_mode_pending_orders_mode_before_prompt() {
+    let mut app = test_app_with_agent();
+
+    let mode_effects = dispatch(Action::CycleMode, &mut app);
+    assert!(matches!(
+        mode_effects.as_slice(),
+        [Effect::SetSessionMode { mode_id, .. }] if mode_id.0.as_ref() == "plan"
+    ));
+    assert_eq!(app.agents[&AgentId(0)].plan_mode_pending, Some(true));
+
+    let prompt_effects = dispatch(Action::SendPrompt("help me plan this".into()), &mut app);
+
+    assert!(
+        matches!(
+            prompt_effects.as_slice(),
+            [Effect::SetModeThenPrompt { mode_id, text, .. }]
+                if mode_id.0.as_ref() == "plan" && text == "help me plan this"
+        ),
+        "pending Plan must be applied before the prompt is sent: {prompt_effects:?}"
+    );
+}
+
+/// Structured skill prompts use the same ordered mode transition as plain
+/// prompts; otherwise their `SendPromptBlocks` path can bypass Plan.
+#[test]
+fn skill_prompt_submitted_while_plan_mode_pending_orders_mode_before_blocks() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    super::prompt::register_pr_workflow_skill(&mut app, id);
+
+    let _ = dispatch(Action::CycleMode, &mut app);
+    let prompt_effects = dispatch(Action::SendPrompt("/pr-workflow ship it".into()), &mut app);
+
+    assert!(
+        matches!(
+            prompt_effects.as_slice(),
+            [Effect::SetModeThenPrompt {
+                mode_id,
+                blocks: Some(blocks),
+                ..
+            }] if mode_id.0.as_ref() == "plan" && !blocks.is_empty()
+        ),
+        "pending Plan must be applied before structured blocks are sent: {prompt_effects:?}"
+    );
+}
+
 /// Sending a prompt is a submit: it retires the active ephemeral tip.
 #[test]
 fn send_prompt_clears_active_ephemeral_tip() {

@@ -1620,6 +1620,9 @@ pub enum Effect {
         mode_id: acp::SessionModeId,
         agent_id: AgentId,
         text: String,
+        /// Structured prompt payload for skills/images. `None` means build a
+        /// plain text block from `text` and `skill_token_ranges`.
+        blocks: Option<Vec<acp::ContentBlock>>,
         prompt_id: String,
         /// See [`Effect::SendPrompt::skill_token_ranges`].
         skill_token_ranges: Vec<std::ops::Range<usize>>,
@@ -2037,6 +2040,13 @@ pub enum SubagentKillOutcome {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum TaskResult {
+    /// Completion of ACP `session/set_mode`. Success is confirmed by the
+    /// authoritative `CurrentModeUpdate`; failure rolls back optimistic UI.
+    SetSessionModeComplete {
+        session_id: acp::SessionId,
+        mode_id: acp::SessionModeId,
+        result: Result<(), String>,
+    },
     /// Session was created successfully.
     SessionCreated {
         agent_id: AgentId,

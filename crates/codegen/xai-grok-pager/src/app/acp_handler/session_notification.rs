@@ -1346,7 +1346,14 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
     let was_active = agent.plan_mode_active;
     let now_active = mode.is_plan();
     agent.plan_mode_active = now_active;
-    agent.plan_mode_pending = None;
+    // A rapid second toggle can leave a newer local intent pending while the
+    // shell's update for the earlier request is still in flight. Reflect the
+    // confirmed server state, but only retire the optimistic intent when this
+    // update agrees with it. The next prompt continues to use the pending
+    // intent and orders it ahead of the turn.
+    if agent.plan_mode_pending == Some(now_active) {
+        agent.plan_mode_pending = None;
+    }
     if was_active != now_active {
         tracing::info!(
             mode_id = % cmu.current_mode_id.0, plan_active = now_active,

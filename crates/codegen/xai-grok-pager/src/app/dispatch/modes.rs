@@ -95,6 +95,7 @@ pub(super) fn dispatch_enter_plan_mode(
                         mode_id: mode_id.clone(),
                         agent_id,
                         text,
+                        blocks: None,
                         prompt_id,
                         skill_token_ranges,
                     });
@@ -125,9 +126,9 @@ pub(super) fn dispatch_enter_plan_mode(
 /// sets `plan_mode_pending`, refreshes modals, toasts, then emits
 /// `Effect::SetSessionMode`. Shell confirms via `CurrentModeUpdate`.
 ///
-/// No explicit rollback — `SetSessionMode` has no failure surface.
-/// If the ACP transport drops, `plan_mode_pending` stays set until
-/// the next `CurrentModeUpdate` or session restart.
+/// `SetSessionModeComplete` rolls the optimistic state back if the ACP request
+/// fails. On success, `CurrentModeUpdate` remains the authoritative
+/// confirmation and clears `plan_mode_pending`.
 ///
 /// Idempotent: same value toasts but skips the ACP round-trip.
 pub(super) fn set_plan_mode(

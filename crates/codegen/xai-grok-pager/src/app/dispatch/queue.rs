@@ -167,6 +167,44 @@ fn format_cron_prompt(prompt: &str, task_id: &str, human_schedule: &str) -> Stri
     xai_grok_tools::reminders::format_scheduled_task_prompt(prompt, task_id, human_schedule)
 }
 
+/// Build the outgoing effect for a user prompt. A pending mode transition
+/// owns the send regardless of whether the payload is plain text or structured
+/// blocks, keeping every user-prompt path behind the same ordering guarantee.
+fn prompt_effect(
+    agent_id: AgentId,
+    session_id: acp::SessionId,
+    pending_mode_id: Option<acp::SessionModeId>,
+    text: String,
+    blocks: Option<Vec<acp::ContentBlock>>,
+    prompt_id: String,
+    skill_token_ranges: Vec<std::ops::Range<usize>>,
+) -> Effect {
+    match (pending_mode_id, blocks) {
+        (Some(mode_id), blocks) => Effect::SetModeThenPrompt {
+            agent_id,
+            session_id,
+            mode_id,
+            text,
+            blocks,
+            prompt_id,
+            skill_token_ranges,
+        },
+        (None, Some(blocks)) => Effect::SendPromptBlocks {
+            agent_id,
+            session_id,
+            blocks,
+            prompt_id,
+        },
+        (None, None) => Effect::SendPrompt {
+            agent_id,
+            session_id,
+            text,
+            prompt_id,
+            skill_token_ranges,
+        },
+    }
+}
+
 /// Try to send the next queued entry (prompt, command, bash, or cron) if the agent is idle.
 ///
 /// Called after enqueue operations and task completions to advance the queue.
@@ -227,6 +265,13 @@ pub(crate) fn maybe_drain_queue(agent: &mut AgentView) -> Vec<Effect> {
         log_blocked("no_session_id", None);
         return vec![];
     };
+    let pending_mode_id = agent.plan_mode_pending.map(|plan_pending| {
+        acp::SessionModeId::new(if plan_pending {
+            xai_grok_tools::types::SessionMode::Plan.as_id()
+        } else {
+            xai_grok_tools::types::SessionMode::Default.as_id()
+        })
+    });
 
     // Block drain if the user is editing the front prompt.
     if let PromptMode::EditingQueued { id, .. } = &agent.prompt_mode
@@ -344,6 +389,7 @@ pub(crate) fn maybe_drain_queue(agent: &mut AgentView) -> Vec<Effect> {
             agent.scrollback.enable_follow_with_preserve();
 
             if let Some(mut blocks) = queued.wire_blocks {
+                let display_text = queued.text.clone();
                 // Skill injection: send structured blocks.
                 // Annotate the first text block's meta with the display text
                 // so the pager can reconstruct the clean prompt on session
@@ -353,7 +399,7 @@ pub(crate) fn maybe_drain_queue(agent: &mut AgentView) -> Vec<Effect> {
                     let map = tb.meta.get_or_insert_with(acp::Meta::new);
                     map.insert(
                         user_prompt_meta::DISPLAY_TEXT.into(),
-                        serde_json::Value::String(queued.text),
+                        serde_json::Value::String(display_text.clone()),
                     );
                     if is_skill {
                         map.insert(
@@ -366,13 +412,17 @@ pub(crate) fn maybe_drain_queue(agent: &mut AgentView) -> Vec<Effect> {
                         "wire_blocks[0] is not TextContent — displayText annotation skipped"
                     );
                 }
-                vec![Effect::SendPromptBlocks {
+                vec![prompt_effect(
                     agent_id,
                     session_id,
-                    blocks,
+                    pending_mode_id,
+                    display_text,
+                    Some(blocks),
                     prompt_id,
-                }]
+                    vec![],
+                )]
             } else if !queued.images.is_empty() {
+                let display_text = queued.text.clone();
                 // Image-bearing prompt: build text + image content blocks.
                 // Pass the session cwd so orphan `[Image #N: <path>]`
                 // placeholders (paste from a previous session, etc.)
@@ -384,21 +434,30 @@ pub(crate) fn maybe_drain_queue(agent: &mut AgentView) -> Vec<Effect> {
                     queued.images,
                     Some(std::path::Path::new(&agent.session.cwd)),
                 );
-                vec![Effect::SendPromptBlocks {
+                vec![prompt_effect(
                     agent_id,
                     session_id,
-                    blocks,
+                    pending_mode_id,
+                    display_text,
+                    Some(blocks),
                     prompt_id,
-                }]
+                    vec![],
+                )]
             } else {
-                // Normal prompt: send text as-is.
-                vec![Effect::SendPrompt {
+                // A mode transition and prompt are separate user actions, but
+                // their ACP tasks may otherwise race. While the pager is still
+                // waiting for CurrentModeUpdate, send them through one ordered
+                // effect so the turn cannot start in the previously confirmed
+                // mode while the UI already displays the requested one.
+                vec![prompt_effect(
                     agent_id,
                     session_id,
-                    text: queued.text,
+                    pending_mode_id,
+                    queued.text,
+                    None,
                     prompt_id,
-                    skill_token_ranges: queued.skill_token_ranges,
-                }]
+                    queued.skill_token_ranges,
+                )]
             }
         }
         QueueEntryKind::Command => {

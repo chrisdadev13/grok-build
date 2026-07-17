@@ -1699,6 +1699,36 @@ fn dispatch_cycle_mode_normal_to_plan_does_not_touch_yolo() {
     );
 }
 
+/// A failed shell mode transition must retire the optimistic Plan state.
+/// Leaving it set makes the pager claim Plan while the shell remains Default.
+#[test]
+fn failed_plan_mode_transition_rolls_back_optimistic_state() {
+    let mut app = test_app_with_agent();
+    let session_id = app.agents[&AgentId(0)]
+        .session
+        .session_id
+        .clone()
+        .expect("test agent has a session");
+
+    let _ = dispatch(Action::CycleMode, &mut app);
+    assert_eq!(app.agents[&AgentId(0)].plan_mode_pending, Some(true));
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SetSessionModeComplete {
+            session_id,
+            mode_id: acp::SessionModeId::new("plan"),
+            result: Err("transport closed".into()),
+        }),
+        &mut app,
+    );
+
+    assert!(effects.is_empty());
+    let agent = &app.agents[&AgentId(0)];
+    assert_eq!(agent.plan_mode_pending, None);
+    assert!(!agent.plan_mode_active);
+    assert!(read_toast(&app).contains("Couldn't switch to Plan mode"));
+}
+
 /// `active_agent_plan_nudge_state` reports the plan-nudge visibility and the
 /// optimistic plan state — the two inputs to the shift+tab acceptance guard.
 #[test]
