@@ -268,7 +268,7 @@ impl acp::Agent for CodexAgent {
                         "title": "Codex TUI",
                         "version": env!("CARGO_PKG_VERSION")
                     },
-                    "capabilities": {"experimentalApi": false}
+                    "capabilities": {"experimentalApi": true}
                 }),
             )
             .await
@@ -384,7 +384,9 @@ impl acp::Agent for CodexAgent {
             .unwrap_or_else(|| "default".to_owned());
         let effort = self.record_session_selection(thread_id.clone(), model.clone(), &response);
         notify_session_startup_complete(&self.client, &thread_id);
-        Ok(acp::NewSessionResponse::new(thread_id).models(self.model_state(model, effort)))
+        Ok(acp::NewSessionResponse::new(thread_id)
+            .modes(codex_session_modes("default"))
+            .models(self.model_state(model, effort)))
     }
 
     async fn load_session(
@@ -410,7 +412,9 @@ impl acp::Agent for CodexAgent {
         let effort = self.record_session_selection(session_id.clone(), model.clone(), &response);
         replay_thread(&self.client, &response).await;
         notify_session_startup_complete(&self.client, &session_id);
-        Ok(acp::LoadSessionResponse::new().models(self.model_state(model, effort)))
+        Ok(acp::LoadSessionResponse::new()
+            .modes(codex_session_modes("default"))
+            .models(self.model_state(model, effort)))
     }
 
     async fn prompt(&self, args: acp::PromptRequest) -> acp::Result<acp::PromptResponse> {
@@ -473,6 +477,52 @@ impl acp::Agent for CodexAgent {
                 .map_err(acp_error)?;
         }
         Ok(())
+    }
+
+    async fn set_session_mode(
+        &self,
+        args: acp::SetSessionModeRequest,
+    ) -> acp::Result<acp::SetSessionModeResponse> {
+        let mode = match args.mode_id.0.as_ref() {
+            "plan" => "plan",
+            "default" => "default",
+            unsupported => {
+                return Err(acp::Error::invalid_params()
+                    .data(format!("unsupported Codex session mode: {unsupported}")));
+            }
+        };
+        let thread_id = args.session_id.0.to_string();
+        let selection = self
+            .selected_models
+            .borrow()
+            .get(&thread_id)
+            .cloned()
+            .ok_or_else(|| {
+                acp::Error::invalid_params().data(format!("unknown Codex session id: {thread_id}"))
+            })?;
+        self.rpc
+            .request(
+                "thread/settings/update",
+                json!({
+                    "threadId": thread_id,
+                    "collaborationMode": {
+                        "mode": mode,
+                        "settings": {
+                            "model": selection.model,
+                            "reasoning_effort": selection.effort.map(ReasoningEffort::as_str),
+                            "developer_instructions": null
+                        }
+                    }
+                }),
+            )
+            .await
+            .map_err(acp_error)?;
+        self.client
+            .forward_fire_and_forget(acp::SessionNotification::new(
+                args.session_id,
+                acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new(args.mode_id)),
+            ));
+        Ok(acp::SetSessionModeResponse::new())
     }
 
     async fn set_session_model(
@@ -924,6 +974,18 @@ fn map_model_state(
     Some(acp::SessionModelState::new(default_model, models))
 }
 
+fn codex_session_modes(current: &str) -> acp::SessionModeState {
+    acp::SessionModeState::new(
+        current.to_owned(),
+        vec![
+            acp::SessionMode::new("default", "Default")
+                .description("Work normally and make changes when requested."),
+            acp::SessionMode::new("plan", "Plan")
+                .description("Investigate and produce a plan without making changes."),
+        ],
+    )
+}
+
 fn model_id(model: &Value) -> Option<&str> {
     model
         .get("id")
@@ -1000,6 +1062,80 @@ fn acp_error(error: anyhow::Error) -> acp::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn setting_acp_plan_mode_updates_codex_collaboration_mode() {
+        let (outbound, mut outbound_rx) = mpsc::unbounded_channel();
+        let pending = Rc::new(RefCell::new(HashMap::new()));
+        let rpc = Rc::new(CodexRpc {
+            outbound,
+            pending: pending.clone(),
+            next_id: Cell::new(1),
+            closed: Rc::new(Cell::new(false)),
+        });
+        let (mut client_channel, agent_channel) = xai_acp_lib::acp_channels();
+        let agent = CodexAgent {
+            rpc,
+            client: AcpGatewaySender::new(agent_channel.tx),
+            models: Rc::new(RefCell::new(Vec::new())),
+            selected_models: Rc::new(RefCell::new(HashMap::from([(
+                "thread-1".into(),
+                CodexModelSelection {
+                    model: "gpt-5.6-sol".into(),
+                    effort: Some(ReasoningEffort::Ultra),
+                },
+            )]))),
+            active_turns: Rc::new(RefCell::new(HashMap::new())),
+            completions: Rc::new(RefCell::new(HashMap::new())),
+            login_completions: Rc::new(RefCell::new(HashMap::new())),
+            authenticated: Cell::new(true),
+            openai_docs_mcp: false,
+        };
+
+        let set_mode = acp::Agent::set_session_mode(
+            &agent,
+            acp::SetSessionModeRequest::new("thread-1", "plan"),
+        );
+        let app_server = async {
+            let request = outbound_rx.recv().await.expect("app-server request");
+            let id = request["id"].as_u64().expect("numeric request id");
+            pending
+                .borrow_mut()
+                .remove(&id)
+                .expect("pending app-server request")
+                .send(Ok(json!({})))
+                .expect("set mode request still waiting");
+            request
+        };
+        let (result, request) = tokio::join!(set_mode, app_server);
+
+        result.expect("Codex plan mode should be supported");
+        assert_eq!(request["method"], "thread/settings/update");
+        assert_eq!(
+            request["params"],
+            json!({
+                "threadId": "thread-1",
+                "collaborationMode": {
+                    "mode": "plan",
+                    "settings": {
+                        "model": "gpt-5.6-sol",
+                        "reasoning_effort": "ultra",
+                        "developer_instructions": null
+                    }
+                }
+            })
+        );
+
+        let message = client_channel.rx.recv().await.expect("mode notification");
+        let xai_acp_lib::AcpClientMessage::SessionNotification(args) = message else {
+            panic!("expected current mode notification");
+        };
+        assert_eq!(args.request.session_id.0.as_ref(), "thread-1");
+        let acp::SessionUpdate::CurrentModeUpdate(update) = args.request.update else {
+            panic!("expected current mode update");
+        };
+        assert_eq!(update.current_mode_id.0.as_ref(), "plan");
+    }
 
     #[tokio::test]
     async fn codex_session_success_notifies_pager_that_startup_is_complete() {
