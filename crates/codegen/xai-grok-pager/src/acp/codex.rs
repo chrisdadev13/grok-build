@@ -415,6 +415,12 @@ impl acp::Agent for CodexAgent {
 
     async fn prompt(&self, args: acp::PromptRequest) -> acp::Result<acp::PromptResponse> {
         let thread_id = args.session_id.0.to_string();
+        let prompt_id = args
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("promptId"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let input = prompt_to_codex_input(&args.prompt);
         let selection = self.selected_models.borrow().get(&thread_id).cloned();
         let model = selection.as_ref().map(|selection| selection.model.clone());
@@ -426,7 +432,7 @@ impl acp::Agent for CodexAgent {
             .rpc
             .request(
                 "turn/start",
-                turn_start_params(&thread_id, input, model, effort),
+                turn_start_params(&thread_id, input, model, effort, prompt_id.as_deref()),
             )
             .await
             .map_err(acp_error)?;
@@ -441,7 +447,14 @@ impl acp::Agent for CodexAgent {
         let (tx, rx) = oneshot::channel();
         self.completions.borrow_mut().insert(turn_id, tx);
         let reason = rx.await.unwrap_or(acp::StopReason::EndTurn);
-        Ok(acp::PromptResponse::new(reason))
+        Ok(
+            acp::PromptResponse::new(reason).meta(prompt_id.map(|prompt_id| {
+                json!({"promptId": prompt_id})
+                    .as_object()
+                    .expect("prompt response metadata is an object")
+                    .clone()
+            })),
+        )
     }
 
     async fn cancel(&self, args: acp::CancelNotification) -> acp::Result<()> {
@@ -960,12 +973,14 @@ fn turn_start_params(
     input: Vec<Value>,
     model: Option<String>,
     effort: Option<&str>,
+    prompt_id: Option<&str>,
 ) -> Value {
     json!({
         "threadId": thread_id,
         "input": input,
         "model": model,
         "effort": effort,
+        "clientUserMessageId": prompt_id,
     })
 }
 
@@ -1087,9 +1102,11 @@ mod tests {
             vec![json!({"type": "text", "text": "hello"})],
             Some("gpt-5.6-sol".into()),
             Some("ultra"),
+            Some("prompt-42"),
         );
         assert_eq!(params["model"], "gpt-5.6-sol");
         assert_eq!(params["effort"], "ultra");
+        assert_eq!(params["clientUserMessageId"], "prompt-42");
     }
 
     #[test]

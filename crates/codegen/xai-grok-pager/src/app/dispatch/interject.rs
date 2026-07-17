@@ -90,6 +90,10 @@ pub(super) fn dispatch_send_prompt_now(
     text: String,
     images: Vec<crate::prompt_images::PastedImage>,
 ) -> Vec<Effect> {
+    if !app.server_authoritative_queue {
+        return dispatch_local_send_prompt_now(app, text, images);
+    }
+
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -163,6 +167,64 @@ pub(super) fn dispatch_send_prompt_now(
         blocks,
         prompt_id,
     }]
+}
+
+/// Cancel-and-send for backends without the Grok shared-queue protocol.
+///
+/// Keep the prompt in the pager-owned FIFO, interrupt the active turn, and let
+/// the normal `PromptResponse` teardown drain it. This guarantees the backend
+/// never sees a second `turn/start` until the interrupted turn has completed.
+fn dispatch_local_send_prompt_now(
+    app: &mut AppView,
+    text: String,
+    images: Vec<crate::prompt_images::PastedImage>,
+) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+
+    agent.ephemeral_tip.clear_on_submit();
+    if agent.session.session_id.is_none() {
+        agent.show_toast("No active session");
+        return vec![];
+    }
+
+    record_interject_prompt_history(agent, &text);
+    let queue_id = agent.session.next_queue_id;
+    agent.session.next_queue_id += 1;
+    agent
+        .session
+        .pending_prompts
+        .push_front(crate::app::agent::QueuedPrompt {
+            images,
+            ..crate::app::agent::QueuedPrompt::plain(
+                queue_id,
+                &text,
+                crate::app::agent::QueueEntryKind::Prompt,
+            )
+        });
+    agent.suppress_parked_marker_on_interject();
+
+    if !agent.session.state.is_turn_running() {
+        return super::queue::maybe_drain_queue(agent);
+    }
+
+    let effects = super::router::dispatch(crate::app::actions::Action::CancelTurn, app);
+    if effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::CancelTurn { .. }))
+        && let Some(agent) = app.agents.get_mut(&id)
+    {
+        // `dispatch_cancel_turn` clears any prior expectation because an
+        // ordinary cancel should render its marker. Re-arm after it builds the
+        // effect so this backend-local cancel-and-send suppresses that marker.
+        agent.arm_send_now_expectation(format!("local-queue-{queue_id}"));
+        agent.show_toast("Sending queued prompt now");
+    }
+    effects
 }
 
 /// Record an interjection in prompt history (Ctrl+R finds interjections).

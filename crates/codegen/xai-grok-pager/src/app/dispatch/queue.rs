@@ -50,9 +50,13 @@ use std::time::Instant;
 /// (e.g. `[2, 3]` shown/run as `[3, 2]`). Requiring an empty local queue keeps
 /// later prompts behind the older ones (they join the local queue and drain in
 /// order), preserving FIFO.
-pub(super) fn immediate_server_send_eligible(agent: &AgentView) -> bool {
+pub(super) fn immediate_server_send_eligible(
+    agent: &AgentView,
+    server_authoritative_queue: bool,
+) -> bool {
     let server_busy = agent.session.state.is_turn_running() || !agent.shared_queue.is_empty();
-    server_busy
+    server_authoritative_queue
+        && server_busy
         && agent.session.session_id.is_some()
         && agent.session.pending_prompts.is_empty()
         && !matches!(agent.prompt_mode, PromptMode::EditingQueued { .. })

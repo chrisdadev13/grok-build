@@ -651,6 +651,78 @@ fn send_prompt_while_running_queues_without_drain() {
     assert_eq!(q[0].text, "queued");
 }
 
+#[test]
+fn backend_without_server_queue_holds_running_follow_up_locally() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.server_authoritative_queue = false;
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+
+    let effects = dispatch(Action::SendPrompt("queued for Codex".into()), &mut app);
+
+    assert!(
+        effects.is_empty(),
+        "a backend without queue lifecycle notifications must not receive a concurrent prompt"
+    );
+    let agent = &app.agents[&id];
+    assert_eq!(agent.session.queue_len(), 1);
+    assert_eq!(agent.session.pending_prompts[0].text, "queued for Codex");
+    assert!(
+        app.shared_prompt_queue("test-session")
+            .is_none_or(|queue| queue.is_empty()),
+        "local queued prompts must not create a server-queue echo"
+    );
+}
+
+#[test]
+fn backend_without_server_queue_send_now_waits_for_cancel_completion() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.server_authoritative_queue = false;
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("running".into());
+    }
+
+    let effects = dispatch(
+        Action::SendPromptNow {
+            text: "run next".into(),
+            images: vec![],
+        },
+        &mut app,
+    );
+
+    assert!(matches!(effects.as_slice(), [Effect::CancelTurn { .. }]));
+    assert_eq!(app.agents[&id].session.pending_prompts[0].text, "run next");
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::SendPromptNow { .. })),
+        "Codex must not receive the replacement turn before cancellation completes"
+    );
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled).meta(
+                serde_json::json!({"promptId": "running"})
+                    .as_object()
+                    .cloned(),
+            )),
+            http_status: None,
+            prompt_id: Some("running".into()),
+        }),
+        &mut app,
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::SendPrompt { text, .. } if text == "run next")),
+        "the queued replacement must start after the interrupted turn completes"
+    );
+}
+
 /// Regression (queue reorder race): a plain prompt typed while a turn is
 /// running must NOT jump onto the server queue when an older prompt is still
 /// waiting in the local drip-feed queue — e.g. prompts queued during

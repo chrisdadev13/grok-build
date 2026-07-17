@@ -333,6 +333,7 @@ pub(super) fn dispatch_send_prompt_inner(
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
+    let server_authoritative_queue = app.server_authoritative_queue;
     // Set when a plain prompt is queued while a turn is running (local path);
     // shown after the agent borrow ends so we can re-enter via the tip helper.
     let mut tip_send_now_after_queue = false;
@@ -639,7 +640,8 @@ pub(super) fn dispatch_send_prompt_inner(
             .recognized_token_ranges(&text, &agent.session.models);
 
         let immediate_server_send =
-            immediate_server_send_eligible(agent) && agent.prompt.images.is_empty();
+            immediate_server_send_eligible(agent, server_authoritative_queue)
+                && agent.prompt.images.is_empty();
         tracing::debug!(
             target: "qtrace",
             pid = std::process::id(),
@@ -661,7 +663,7 @@ pub(super) fn dispatch_send_prompt_inner(
 
         // Images can't ride immediate server-send; empty-held park still send-nows.
         if !immediate_server_send
-            && immediate_server_send_eligible(agent)
+            && immediate_server_send_eligible(agent, server_authoritative_queue)
             && !agent.prompt.images.is_empty()
             && parked_sendable_wait
             && !hold_behind_existing_queue
@@ -807,6 +809,7 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    let server_authoritative_queue = app.server_authoritative_queue;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -838,7 +841,7 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
     // into the shared queue with `kind="bash"`. On `running_prompt_id`
     // adoption the turn-start shim sets `bash_turn` (no user block). The IDLE
     // case is unchanged: enqueue locally + drain instantly.
-    let bash_immediate = immediate_server_send_eligible(agent);
+    let bash_immediate = immediate_server_send_eligible(agent, server_authoritative_queue);
     tracing::debug!(
         target: "qtrace",
         pid = std::process::id(),

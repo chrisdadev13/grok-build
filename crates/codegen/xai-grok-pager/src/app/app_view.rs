@@ -658,6 +658,11 @@ pub struct AppView {
     /// `event_loop::run` from `connection.leader_status_rx.is_some()`;
     /// defaults to `false` (non-leader, dashboard hidden).
     pub leader_mode: bool,
+    /// Whether the connected ACP backend owns a shared, server-authoritative
+    /// prompt queue and emits `x.ai/queue/changed` lifecycle notifications.
+    /// Backends without that protocol (notably Codex app-server) keep queued
+    /// prompts in the pager's local FIFO until the active turn completes.
+    pub server_authoritative_queue: bool,
     /// App-level credit balance used to show the usage warning on the
     /// welcome screen before any agent session exists.
     pub credit_balance: Option<crate::views::credit_bar::CreditBalance>,
@@ -1316,6 +1321,7 @@ impl AppView {
             usage_visible: true,
             tier_restricted_commands: Vec::new(),
             leader_mode: false,
+            server_authoritative_queue: true,
             credit_balance: None,
             auto_topup: None,
             billing_poll_wanted: false,
@@ -5186,6 +5192,7 @@ pub(crate) mod tests {
             usage_visible: true,
             tier_restricted_commands: Vec::new(),
             leader_mode: true,
+            server_authoritative_queue: true,
             credit_balance: None,
             auto_topup: None,
             billing_poll_wanted: false,

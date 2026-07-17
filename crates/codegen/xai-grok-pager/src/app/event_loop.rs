@@ -482,11 +482,13 @@ pub(crate) async fn run(
 
     crate::unified_log::init(connection.tx.clone());
     crate::unified_log::info("pager started", None, None);
+    let server_authoritative_queue = connection.is_grok_shell;
     let mut app = AppView::new(
         connection.tx,
         connection.models,
         connection.available_commands,
     );
+    app.server_authoritative_queue = server_authoritative_queue;
     app.tracing_rx = Some(tracing_handle.rx);
     // Startup terminal height for the auto-compact derivation; kept fresh by
     // `Event::Resize` from here on. 0 (probe failure) never forces compact.
