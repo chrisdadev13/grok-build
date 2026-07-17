@@ -560,7 +560,7 @@ mod tests {
             session_name: None,
             model: None,
             activity: None,
-            has_pending_permissions: false,
+            has_pending_interaction: false,
             cwd: None,
             turn_elapsed: None,
             is_busy,

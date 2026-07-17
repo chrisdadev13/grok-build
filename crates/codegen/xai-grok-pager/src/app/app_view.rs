@@ -4914,28 +4914,32 @@ impl AppView {
     /// Also clears the permission notification flag when no permissions
     /// remain queued, so the next batch fires a fresh bell/popup.
     pub fn update_notifications(&mut self) {
-        let (session_name, model, activity, has_perms, turn_elapsed, is_busy) =
-            if let ActiveView::Agent(id) = self.active_view
-                && let Some(agent) = self.agents.get(&id)
-            {
-                let name = agent
-                    .display_name
-                    .as_deref()
-                    .or(agent.generated_session_title.as_deref());
-                let model = agent.session.models.current_model_name();
-                let parked = agent.renders_parked();
-                let activity = if parked {
-                    None
-                } else {
-                    agent.resolve_turn_activity()
-                };
-                let has_perms = !agent.permission_queue.is_empty();
-                let elapsed = if parked { None } else { agent.turn_elapsed() };
-                let is_busy = agent.session.state.is_busy() && !parked;
-                (name, model, activity, has_perms, elapsed, is_busy)
+        let (session_name, model, activity, turn_elapsed, is_busy) = if let ActiveView::Agent(id) =
+            self.active_view
+            && let Some(agent) = self.agents.get(&id)
+        {
+            let name = agent
+                .display_name
+                .as_deref()
+                .or(agent.generated_session_title.as_deref());
+            let model = agent.session.models.current_model_name();
+            let parked = agent.renders_parked();
+            let activity = if parked {
+                None
             } else {
-                (None, None, None, false, None, false)
+                agent.resolve_turn_activity()
             };
+            let elapsed = if parked { None } else { agent.turn_elapsed() };
+            let is_busy = agent.session.state.is_busy() && !parked;
+            (name, model, activity, elapsed, is_busy)
+        } else {
+            (None, None, None, None, false)
+        };
+        let has_pending_interaction = self.agents.values().any(|agent| {
+            !agent.permission_queue.is_empty()
+                || agent.question_view.is_some()
+                || agent.plan_approval_view.is_some()
+        });
         let any_agent_has_perms = self.agents.values().any(|a| !a.permission_queue.is_empty());
         if !any_agent_has_perms {
             self.notification_service.clear_permission_notification();
@@ -4945,7 +4949,7 @@ impl AppView {
             session_name,
             model: model.as_deref(),
             activity: activity.as_ref(),
-            has_pending_permissions: has_perms,
+            has_pending_interaction,
             cwd: Some(&cwd_str),
             turn_elapsed,
             is_busy,
@@ -9658,6 +9662,94 @@ pub(crate) mod tests {
             crate::views::prompt_widget::StashedPrompt::default(),
         ));
     }
+
+    /// Question overlays are blocking interactions. Their OSC title must use
+    /// the same Action Required signal as permissions so screen-manifest
+    /// consumers (including Herdr's Codex detector) can surface the pane.
+    #[test]
+    fn question_overlay_marks_terminal_title_action_required() {
+        let (mut app, id) = neutral_overlay_app();
+        install_question_overlay(&mut app, id, 1);
+
+        app.update_notifications();
+
+        let escapes = app
+            .pending_notification_escapes
+            .as_deref()
+            .expect("question overlay should update the terminal title");
+        assert!(
+            escapes.contains("Action Required"),
+            "question title must expose a visible blocker, got: {escapes:?}"
+        );
+
+        app.pending_notification_escapes.take();
+        app.agents.get_mut(&id).unwrap().question_view.take();
+        app.update_notifications();
+
+        let escapes = app
+            .pending_notification_escapes
+            .as_deref()
+            .expect("closing the question overlay should clear the title blocker");
+        assert!(
+            !escapes.contains("Action Required"),
+            "resolved question title must clear the blocker, got: {escapes:?}"
+        );
+    }
+
+    /// A question can arrive for a parked session while another session is
+    /// selected. The process-wide terminal title must still expose the
+    /// blocker so Herdr can mark the Codex pane as blocked immediately.
+    #[test]
+    fn background_question_marks_terminal_title_action_required() {
+        let (mut app, active_id) = neutral_overlay_app();
+        let background_id = super::super::agent::AgentId(1);
+        let background = *idle_child_view(&app, 1, "background-question");
+        app.agents.insert(background_id, background);
+        install_question_overlay(&mut app, background_id, 1);
+        assert_eq!(app.active_view, ActiveView::Agent(active_id));
+
+        app.update_notifications();
+
+        let escapes = app
+            .pending_notification_escapes
+            .as_deref()
+            .expect("background question should update the terminal title");
+        assert!(
+            escapes.contains("Action Required"),
+            "background question must expose a visible blocker, got: {escapes:?}"
+        );
+    }
+
+    #[test]
+    fn plan_approval_marks_terminal_title_action_required() {
+        let (mut app, id) = neutral_overlay_app();
+        install_plan_overlay(&mut app, id);
+
+        app.update_notifications();
+
+        let escapes = app
+            .pending_notification_escapes
+            .as_deref()
+            .expect("plan approval should update the terminal title");
+        assert!(
+            escapes.contains("Action Required"),
+            "plan approval must expose a visible blocker, got: {escapes:?}"
+        );
+
+        app.pending_notification_escapes.take();
+        app.agents.get_mut(&id).unwrap().plan_approval_view.take();
+        app.update_notifications();
+
+        let escapes = app
+            .pending_notification_escapes
+            .as_deref()
+            .expect("closing plan approval should clear the title blocker");
+        assert!(
+            !escapes.contains("Action Required"),
+            "resolved plan approval must clear the blocker, got: {escapes:?}"
+        );
+    }
+
     /// Graduated back-out: at the plan feedback top state (empty prompt,
     /// no pending comment) a bare Esc returns to the dashboard, leaving
     /// the plan overlay pending (no approve / reject is sent).

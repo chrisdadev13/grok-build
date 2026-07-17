@@ -1266,7 +1266,7 @@ pub(super) fn handle_prompt_response(
                     session_name,
                     model: model.as_deref(),
                     activity: None,
-                    has_pending_permissions: false,
+                    has_pending_interaction: false,
                     cwd: Some(&cwd_str),
                     turn_elapsed: None,
                     is_busy: false,

@@ -31,7 +31,9 @@ pub struct TitleState<'a> {
     pub session_name: Option<&'a str>,
     pub model: Option<&'a str>,
     pub activity: Option<&'a TurnActivity>,
-    pub has_pending_permissions: bool,
+    /// Whether the terminal pane is blocked on a permission, question, or
+    /// plan approval that requires user action in any session.
+    pub has_pending_interaction: bool,
     pub cwd: Option<&'a str>,
     pub turn_elapsed: Option<std::time::Duration>,
     /// Whether the agent is busy (turn or command running), even if
@@ -191,7 +193,7 @@ fn write_item(
             let _ = write!(buf, "{}s", secs);
         }
         TitleItem::ActionRequired => {
-            if !state.has_pending_permissions {
+            if !state.has_pending_interaction {
                 return false;
             }
             // Blink (oscillate) only while unfocused, for tab attention.
@@ -296,7 +298,7 @@ mod tests {
             session_name: None,
             model: None,
             activity: None,
-            has_pending_permissions: false,
+            has_pending_interaction: false,
             cwd: None,
             turn_elapsed: None,
             is_busy: false,
@@ -579,7 +581,7 @@ mod tests {
         let cfg = config_with_items(vec![TitleItem::ActionRequired, TitleItem::Grok]);
         let mut mgr = TitleManager::new(&cfg);
         let state = TitleState {
-            has_pending_permissions: true,
+            has_pending_interaction: true,
             ..idle_state()
         };
 
@@ -597,7 +599,7 @@ mod tests {
         let cfg = config_with_items(vec![TitleItem::ActionRequired, TitleItem::Grok]);
         let mut mgr = TitleManager::new(&cfg);
         let state = TitleState {
-            has_pending_permissions: true,
+            has_pending_interaction: true,
             focused: false, // unfocused → should blink
             ..idle_state()
         };
@@ -625,11 +627,11 @@ mod tests {
     }
 
     #[test]
-    fn action_required_hidden_when_no_permissions() {
+    fn action_required_hidden_when_no_pending_interaction() {
         let cfg = config_with_items(vec![TitleItem::ActionRequired, TitleItem::Grok]);
         let mut mgr = TitleManager::new(&cfg);
         let state = TitleState {
-            has_pending_permissions: false,
+            has_pending_interaction: false,
             ..idle_state()
         };
         mgr.update(&state);
@@ -780,14 +782,14 @@ mod tests {
     // --- Full default config integration ---
 
     #[test]
-    fn default_config_active_turn_with_permissions() {
+    fn default_config_active_turn_with_pending_interaction() {
         let cfg = default_config();
         let mut mgr = TitleManager::new(&cfg);
         let activity = TurnActivity::Responding;
         let state = TitleState {
             session_name: Some("my-session"),
             activity: Some(&activity),
-            has_pending_permissions: true,
+            has_pending_interaction: true,
             focused: false, // unfocused → should blink per original test
             ..idle_state()
         };
