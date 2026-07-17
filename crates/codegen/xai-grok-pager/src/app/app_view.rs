@@ -1321,7 +1321,7 @@ impl AppView {
             usage_visible: true,
             tier_restricted_commands: Vec::new(),
             leader_mode: false,
-            server_authoritative_queue: true,
+            server_authoritative_queue: false,
             credit_balance: None,
             auto_topup: None,
             billing_poll_wanted: false,

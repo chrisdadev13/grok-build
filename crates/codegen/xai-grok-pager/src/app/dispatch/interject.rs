@@ -90,10 +90,6 @@ pub(super) fn dispatch_send_prompt_now(
     text: String,
     images: Vec<crate::prompt_images::PastedImage>,
 ) -> Vec<Effect> {
-    if !app.server_authoritative_queue {
-        return dispatch_local_send_prompt_now(app, text, images);
-    }
-
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -121,6 +117,10 @@ pub(super) fn dispatch_send_prompt_now(
             });
         agent.show_toast("Reconnecting, please wait...");
         return vec![];
+    }
+
+    if !app.server_authoritative_queue {
+        return dispatch_local_send_prompt_now(app, text, images);
     }
 
     // Submitting retires any edit-contextual ephemeral tip.
@@ -221,7 +221,16 @@ fn dispatch_local_send_prompt_now(
         // `dispatch_cancel_turn` clears any prior expectation because an
         // ordinary cancel should render its marker. Re-arm after it builds the
         // effect so this backend-local cancel-and-send suppresses that marker.
-        agent.arm_send_now_expectation(format!("local-queue-{queue_id}"));
+        // The local path only needs to suppress the cancellation marker. It
+        // does not paint/adopt a server queue row, so arming the coupled
+        // viewport-follow pin would leave an ID that can never be consumed.
+        agent.expect_send_now_cancel = Some(
+            agent
+                .session
+                .current_prompt_id
+                .clone()
+                .unwrap_or_else(|| format!("local-cancel-{queue_id}")),
+        );
         agent.show_toast("Sending queued prompt now");
     }
     effects

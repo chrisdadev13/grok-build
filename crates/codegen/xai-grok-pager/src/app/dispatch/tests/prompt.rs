@@ -695,6 +695,11 @@ fn backend_without_server_queue_send_now_waits_for_cancel_completion() {
 
     assert!(matches!(effects.as_slice(), [Effect::CancelTurn { .. }]));
     assert_eq!(app.agents[&id].session.pending_prompts[0].text, "run next");
+    assert_eq!(
+        app.agents[&id].expect_send_now_cancel.as_deref(),
+        Some("running")
+    );
+    assert!(app.agents[&id].follow_without_jump_prompt_id.is_none());
     assert!(
         !effects
             .iter()
@@ -721,6 +726,28 @@ fn backend_without_server_queue_send_now_waits_for_cancel_completion() {
             .any(|effect| matches!(effect, Effect::SendPrompt { text, .. } if text == "run next")),
         "the queued replacement must start after the interrupted turn completes"
     );
+}
+
+#[test]
+fn backend_without_server_queue_send_now_stays_queued_while_reconnecting() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.server_authoritative_queue = false;
+    app.reconnect_pending = true;
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+
+    let effects = dispatch(
+        Action::SendPromptNow {
+            text: "wait for reconnect".into(),
+            images: vec![],
+        },
+        &mut app,
+    );
+
+    assert!(effects.is_empty());
+    let agent = &app.agents[&id];
+    assert_eq!(agent.session.pending_prompts[0].text, "wait for reconnect");
+    assert_eq!(agent.session.state, AgentState::TurnRunning);
 }
 
 /// Regression (queue reorder race): a plain prompt typed while a turn is
