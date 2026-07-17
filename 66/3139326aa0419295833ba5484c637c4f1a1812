@@ -1,0 +1,38 @@
+crates/codegen/xai-grok-pager/src/app/dispatch/prompt.rs
+  s_2a908831c2cfa9::t_601621ad540b83 336,643-644,666,812,844
+crates/codegen/xai-grok-pager/src/app/event_loop.rs
+  s_2a908831c2cfa9::t_601621ad540b83 485,491
+crates/codegen/xai-grok-pager/src/app/dispatch/tests/prompt.rs
+  s_2a908831c2cfa9::t_71613d43808ff4 654-676
+  s_2a908831c2cfa9::t_0cacbdab8b603c 677-725
+crates/codegen/xai-grok-pager/src/app/dispatch/queue.rs
+  s_2a908831c2cfa9::t_601621ad540b83 53-56,58-59
+crates/codegen/xai-grok-pager/src/acp/codex.rs
+  s_2a908831c2cfa9::t_59924fde06a915 418-423,435,452-455,976,983,1105,1109
+  s_2a908831c2cfa9::t_7486096fb5e39f 450-451,456-457
+crates/codegen/xai-grok-pager/src/app/dispatch/tests/mod.rs
+  s_2a908831c2cfa9::t_71613d43808ff4 235
+crates/codegen/xai-grok-pager/src/app/app_view.rs
+  s_2a908831c2cfa9::t_71613d43808ff4 661-665,1324
+  s_2a908831c2cfa9::t_601621ad540b83 5195
+crates/codegen/xai-grok-pager/src/app/dispatch/interject.rs
+  s_2a908831c2cfa9::t_f49345a98cc8a7 215
+  s_2a908831c2cfa9::t_0cacbdab8b603c 93-96,172-214,216-227
+  s_2a908831c2cfa9::t_12640e9857ebad 228-229
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "663139326aa0419295833ba5484c637c4f1a1812",
+  "prompts": {},
+  "sessions": {
+    "s_2a908831c2cfa9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6dac-0554-7e10-925f-f7dcbe90a355",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "chrisdadev13 <chrisdadev13@gmail.com>"
+    }
+  }
+}
